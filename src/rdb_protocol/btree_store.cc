@@ -3,6 +3,7 @@
 
 #include "btree/operations.hpp"
 #include "btree/secondary_operations.hpp"
+#include "btree/slice.hpp"
 #include "buffer_cache/alt/alt.hpp"
 #include "buffer_cache/alt/cache_balancer.hpp"
 #include "concurrency/wait_any.hpp"
@@ -51,11 +52,11 @@ store_t::store_t(serializer_t *serializer,
 
     if (create) {
         vector_stream_t key;
-        write_message_t msg;
+        write_message_t wm;
         region_t kr = region_t::universe();
-        msg << kr;
-        key.reserve(msg.size());
-        int res = send_write_message(&key, &msg);
+        serialize(&wm, kr);
+        key.reserve(wm.size());
+        int res = send_write_message(&key, &wm);
         guarantee(!res);
 
         txn_t txn(general_cache_conn.get(), write_durability_t::HARD,
@@ -389,7 +390,7 @@ bool store_t::add_sindex(
 // just take the buf_parent_t.  (The reason might be that it's interruptible?)
 void clear_sindex(
         txn_t *txn, block_id_t superblock_id,
-        value_sizer_t<void> *sizer,
+        value_sizer_t *sizer,
         const value_deleter_t *deleter, signal_t *interruptor) {
     /* Notice we're acquire sindex.superblock twice below which seems odd,
      * the reason for this is that erase_all releases the sindex_superblock
@@ -416,7 +417,7 @@ void clear_sindex(
 void store_t::set_sindexes(
         const std::map<std::string, secondary_index_t> &sindexes,
         buf_lock_t *sindex_block,
-        value_sizer_t<void> *sizer,
+        value_sizer_t *sizer,
         const deletion_context_t *live_deletion_context,
         const deletion_context_t *post_construction_deletion_context,
         std::set<std::string> *created_sindexes_out,
@@ -514,7 +515,7 @@ bool store_t::mark_index_up_to_date(uuid_u id,
 MUST_USE bool store_t::drop_sindex(
         const std::string &id,
         buf_lock_t *sindex_block,
-        value_sizer_t<void> *sizer,
+        value_sizer_t *sizer,
         const deletion_context_t *live_deletion_context,
         const deletion_context_t *post_construction_deletion_context,
         signal_t *interruptor)
@@ -761,10 +762,10 @@ void store_t::update_metainfo(const metainfo_t &old_metainfo,
 
     for (region_map_t<binary_blob_t>::const_iterator i = updated_metadata.begin(); i != updated_metadata.end(); ++i) {
         vector_stream_t key;
-        write_message_t msg;
-        msg << i->first;
-        key.reserve(msg.size());
-        DEBUG_VAR int res = send_write_message(&key, &msg);
+        write_message_t wm;
+        serialize(&wm, i->first);
+        key.reserve(wm.size());
+        DEBUG_VAR int res = send_write_message(&key, &wm);
         rassert(!res);
 
         std::vector<char> value(static_cast<const char*>(i->second.data()),
