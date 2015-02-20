@@ -15,12 +15,15 @@
 #include "containers/archive/buffer_stream.hpp"
 #include "containers/archive/vector_stream.hpp"
 #include "containers/archive/versioned.hpp"
+#include "containers/counted.hpp"
 #include "containers/disk_backed_queue.hpp"
 #include "containers/scoped.hpp"
 #include "logger.hpp"
 #include "rdb_protocol/btree.hpp"
 #include "rdb_protocol/erase_range.hpp"
+#include "rdb_protocol/func.hpp"
 #include "rdb_protocol/protocol.hpp"
+#include "rdb_protocol/wire_func.hpp"
 #include "serializer/config.hpp"
 #include "stl_utils.hpp"
 
@@ -180,10 +183,129 @@ void store_t::read(
     protocol_read(read, response, superblock.get(), interruptor);
 }
 
+const size_t split_size = 128; // So sayeth Daniel of the Mewes.
+
+class split_visitor_t : public boost::static_visitor<bool> {
+public:
+    split_visitor_t(const write_t *_base_write, std::vector<write_t> *_out)
+        : base_write(_base_write), out(_out) { }
+    bool operator()(const batched_replace_t &replace) const {
+        size_t size = replace.keys.size();
+        if (size <= split_size) return false;
+        out->reserve(size / split_size + (size % split_size != 0));
+        size_t i = 0;
+        while (i < size) {
+            size_t step = split_size;
+            size_t keys_left = size - i;
+            if (step < keys_left && keys_left < 2*step) {
+                // Be less absurd if we have e.g. `split_size + 1` elements.
+                step = keys_left / 2;
+            }
+
+            std::vector<store_key_t> subkeys;
+            subkeys.reserve(step);
+            while (step-- > 0 && i < size) {
+                subkeys.push_back(replace.keys[i++]);
+            }
+            out->push_back(
+                write_t(
+                    batched_replace_t(
+                        std::move(subkeys),
+                        replace.pkey,
+                        replace.f.compile_wire_func(),
+                        replace.optargs,
+                        replace.return_changes),
+                    base_write->durability_requirement,
+                    base_write->profile,
+                    base_write->limits));
+        }
+        return true;
+    }
+    bool operator()(const batched_insert_t &insert) const {
+        size_t size = insert.inserts.size();
+        if (size <= split_size) return false;
+        out->reserve(size / split_size + (size % split_size != 0));
+        size_t i = 0;
+        while (i < size) {
+            size_t step = split_size;
+            size_t keys_left = size - i;
+            if (step < keys_left && keys_left < 2*step) {
+                // Be less absurd if we have e.g. `split_size + 1` elements.
+                step = keys_left / 2;
+            }
+
+            std::vector<ql::datum_t> subdata;
+            subdata.reserve(step);
+            while (step-- > 0 && i < size) {
+                subdata.push_back(insert.inserts[i++]);
+            }
+            out->push_back(
+                write_t(
+                    batched_insert_t(
+                        std::move(subdata),
+                        insert.pkey,
+                        insert.conflict_behavior,
+                        insert.limits,
+                        insert.return_changes),
+                    base_write->durability_requirement,
+                    base_write->profile,
+                    base_write->limits));
+        }
+        return true;
+    }
+    bool operator()(const point_write_t &) const { return false; }
+    bool operator()(const point_delete_t &) const { return false; }
+    bool operator()(const sindex_create_t &) const { return false; }
+    bool operator()(const sindex_drop_t &) const { return false; }
+    bool operator()(const sindex_rename_t &) const { return false; }
+    bool operator()(const sync_t &) const { return false; }
+    bool operator()(const dummy_write_t &) const { return false; }
+private:
+    const write_t *base_write;
+    std::vector<write_t> *out;
+};
+
+bool split(const write_t &write, std::vector<write_t> *out) {
+    return boost::apply_visitor(split_visitor_t(&write, out), write.write);
+}
+
+class expected_changes_visitor_t : public boost::static_visitor<size_t> {
+public:
+    size_t operator()(const batched_replace_t &replace) const {
+        return replace.keys.size();
+    }
+    size_t operator()(const batched_insert_t &insert) const {
+        return insert.inserts.size();
+    }
+    size_t operator()(const point_write_t &) const {
+        return 1;
+    }
+    size_t operator()(const point_delete_t &) const {
+        return 1;
+    }
+
+    // Not sure what these should be, but they were 2 before so that behavior
+    // can't be too pathological.
+    size_t operator()(const sindex_create_t &) const { return 2; }
+    size_t operator()(const sindex_drop_t &) const { return 2; }
+    size_t operator()(const sindex_rename_t &) const { return 2; }
+    size_t operator()(const sync_t &) const { return 2; }
+    size_t operator()(const dummy_write_t &) const { return 2; }
+};
+
+int expected_changes(const write_t &write) {
+    size_t size = boost::apply_visitor(expected_changes_visitor_t(), write.write);
+    if (size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        return std::numeric_limits<int>::max();
+    } else {
+        return static_cast<int>(size);
+    }
+}
+
 void store_t::write(
         DEBUG_ONLY(const metainfo_checker_t& metainfo_checker, )
         const region_map_t<binary_blob_t>& new_metainfo,
-        const write_t &write,
+        const write_t &base_write,
         write_response_t *response,
         const write_durability_t durability,
         state_timestamp_t timestamp,
@@ -195,18 +317,46 @@ void store_t::write(
 
     scoped_ptr_t<txn_t> txn;
     scoped_ptr_t<real_superblock_t> real_superblock;
-    const int expected_change_count = 2; // FIXME: this is incorrect, but will do for now
-    acquire_superblock_for_write(timestamp.to_repli_timestamp(),
-                                 expected_change_count, durability, token,
-                                 &txn, &real_superblock, interruptor);
 
-    check_and_update_metainfo(DEBUG_ONLY(metainfo_checker, ) new_metainfo,
-                              real_superblock.get());
-    scoped_ptr_t<superblock_t> superblock(real_superblock.release());
-    protocol_write(write, response, timestamp, &superblock, interruptor);
+    std::vector<write_t> writes;
+    if (split(base_write, &writes)) {
+        guarantee(writes.size() > 0);
+        for (const auto &write : writes) {
+            acquire_superblock_for_write(
+                timestamp.to_repli_timestamp(),
+                expected_changes(write),
+                durability,
+                token,
+                &txn,
+                &real_superblock,
+                interruptor);
+
+            check_and_update_metainfo(DEBUG_ONLY(metainfo_checker, ) new_metainfo,
+                                      real_superblock.get());
+            scoped_ptr_t<superblock_t> superblock(real_superblock.release());
+            protocol_write(write, response, timestamp, &superblock, interruptor);
+        }
+    } else {
+        guarantee(writes.size() == 0);
+        acquire_superblock_for_write(
+            timestamp.to_repli_timestamp(),
+            expected_changes(base_write),
+            durability,
+            token,
+            &txn,
+            &real_superblock,
+            interruptor);
+
+        check_and_update_metainfo(DEBUG_ONLY(metainfo_checker, ) new_metainfo,
+                                  real_superblock.get());
+        scoped_ptr_t<superblock_t> superblock(real_superblock.release());
+        protocol_write(base_write, response, timestamp, &superblock, interruptor);
+    }
 }
 
-// TODO: Figure out wtf does the backfill filtering, figure out wtf constricts delete range operations to hit only a certain hash-interval, figure out what filters keys.
+// TODO: Figure out wtf does the backfill filtering, figure out wtf constricts
+// delete range operations to hit only a certain hash-interval, figure out what
+// filters keys.
 bool store_t::send_backfill(
         const region_map_t<state_timestamp_t> &start_point,
         send_backfill_callback_t *send_backfill_cb,
