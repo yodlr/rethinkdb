@@ -84,9 +84,9 @@ enum class reql_version_t {
     // version changes
     v2_0_is_latest = v2_0,
 
-    // Code that uses _is_latest_ordering may need to be updated when
+    // Code that uses _has_v1_14_ordering may need to be updated when
     // the ordering of datums changes
-    v1_14_is_latest_ordering = v2_0,
+    LATEST_has_v1_14_ordering = v2_0,
 
     EARLIEST = v1_13,
     LATEST = v2_0,

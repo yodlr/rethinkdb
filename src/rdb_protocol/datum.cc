@@ -1504,9 +1504,8 @@ int datum_t::v1_13_cmp(const datum_t &rhs) const {
 }
 
 int datum_t::cmp(reql_version_t reql_version, const datum_t &rhs) const {
-    // If the ordering of ReQL terms ever changes, rename v1_14_is_latest_ordering
-    static_assert(reql_version_t::v1_14_is_latest_ordering == reql_version_t::LATEST,
-                  "v1_14_is_latest_ordering should be LATEST, see version.hpp");
+    // If the ordering of ReQL terms changes, rename
+    // LATEST_has_v1_14_ordering in version.hpp
     switch (reql_version) {
     case reql_version_t::v1_13:
         return v1_13_cmp(rhs);
@@ -1526,7 +1525,7 @@ int datum_t::modern_cmp(const datum_t &rhs) const {
         if (get_reql_type() != rhs.get_reql_type()) {
             return derived_cmp(get_reql_type(), rhs.get_reql_type());
         }
-        return pseudo_cmp(reql_version_t::v1_14_is_latest_ordering, rhs);
+        return pseudo_cmp(reql_version_t::LATEST_has_v1_14_ordering, rhs);
     } else if (lhs_ptype || rhs_ptype) {
         return derived_cmp(get_type_name(), rhs.get_type_name());
     }

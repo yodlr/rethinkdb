@@ -180,7 +180,7 @@ public:
     // We assume > v1_13 ordering.  We could get fancy and allow any
     // ordering, but usage of grouped_t inside of secondary index functions is the
     // only place where we'd want v1_13 ordering, so let's not bother.
-    grouped_t() : m(optional_datum_less_t(reql_version_t::v1_14_is_latest_ordering)) { }
+    grouped_t() : m(optional_datum_less_t(reql_version_t::LATEST_has_v1_14_ordering)) { }
     virtual ~grouped_t() { } // See grouped_data_t below.
     template <cluster_version_t W>
     friend
