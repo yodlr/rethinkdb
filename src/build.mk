@@ -38,18 +38,6 @@ ifeq ($(COMPILER),CLANG)
 
   RT_LDFLAGS += $(M_LIBS)
 
-else ifeq ($(COMPILER),INTEL)
-  RT_LDFLAGS += -B/opt/intel/bin
-
-  ifeq ($(STATICFORCE),1)
-    # TODO(OSX)
-    ifeq ($(OS),Linux)
-      RT_LDFLAGS += -static
-      STATIC_LIBGCC = 1
-    endif
-  endif
-
-  RT_LDFLAGS += -lstdc++
 else ifeq ($(COMPILER),GCC)
 
   ifeq ($(OS),Linux)
@@ -107,10 +95,7 @@ endif
 
 RT_CXXFLAGS += -Wnon-virtual-dtor -Wno-deprecated-declarations -std=gnu++0x
 
-ifeq ($(COMPILER), INTEL)
-  RT_CXXFLAGS += -w1 -ftls-model=local-dynamic
-
-else ifeq ($(COMPILER), CLANG)
+ifeq ($(COMPILER), CLANG)
   RT_CXXFLAGS += -Wformat=2 -Wswitch-enum -Wswitch-default # -Wno-unneeded-internal-declaration
   RT_CXXFLAGS += -Wused-but-marked-unused -Wundef -Wvla -Wshadow
   RT_CXXFLAGS += -Wconditional-uninitialized -Wmissing-noreturn
@@ -134,14 +119,6 @@ endif
 ifeq ($(AGRESSIVE_BUF_UNLOADING),1)
   RT_CXXFLAGS += -DAGRESSIVE_BUF_UNLOADING=1
 endif
-
-# TODO: >() only works on bash >= 4
-LD_OUTPUT_FILTER ?=
-ifeq ($(COMPILER),INTEL)
-  # TODO: get rid of the cause of this warning, not just the warning itself
-  LD_OUTPUT_FILTER += 2> >(grep -v "warning: relocation refers to discarded section")
-endif
-
 
 ifeq ($(RT_FORCE_NATIVE),1)
   RT_CXXFLAGS+=-march=native
@@ -348,7 +325,7 @@ endif
 
 $(BUILD_DIR)/$(SERVER_EXEC_NAME): $(SERVER_EXEC_OBJS) | $(BUILD_DIR)/. $(RETHINKDB_DEPENDENCIES_LIBS)
 	$P LD $@
-	$(RT_CXX) $(SERVER_EXEC_OBJS) $(RT_LDFLAGS) -o $(BUILD_DIR)/$(SERVER_EXEC_NAME) $(LD_OUTPUT_FILTER)
+	$(RT_CXX) $(SERVER_EXEC_OBJS) $(RT_LDFLAGS) -o $(BUILD_DIR)/$(SERVER_EXEC_NAME)
 	$(MAYBE_CHECK_STATIC_MALLOC)
 
 ifeq (1,$(SPLIT_SYMBOLS))
@@ -372,7 +349,7 @@ $(SERVER_UNIT_TEST_OBJS): | $(GTEST_INCLUDE_DEP)
 
 $(BUILD_DIR)/$(SERVER_UNIT_TEST_NAME): $(SERVER_UNIT_TEST_OBJS) $(GTEST_LIBS_DEP) | $(BUILD_DIR)/. $(RETHINKDB_DEPENDENCIES_LIBS)
 	$P LD $@
-	$(RT_CXX) $(SERVER_UNIT_TEST_OBJS) $(RT_LDFLAGS) $(GTEST_LIBS) -o $@ $(LD_OUTPUT_FILTER)
+	$(RT_CXX) $(SERVER_UNIT_TEST_OBJS) $(RT_LDFLAGS) $(GTEST_LIBS) -o $@
 
 $(BUILD_DIR)/$(GDB_FUNCTIONS_NAME): | $(BUILD_DIR)/.
 	$P CP $@
