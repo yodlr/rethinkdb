@@ -131,7 +131,7 @@ function eq_test(expected, result, compOpts, partial) {
 
     } else {
         // Primitive comparison
-        return ((typeof expected === typeof result) && (expected === result)) || (isNaN(expected) && isNaN(result))
+        return ((typeof expected === typeof result) && (expected === result)) || (Number.isNaN(Number(expected)) && Number.isNaN(Number(result)))
     }
 }
 
@@ -425,7 +425,7 @@ function processResult(err, result, test) {
         // - pull out feeds and cursors to arrays
         
         else if (result instanceof Object && result.each) {
-            if (!isNaN(test.testopts.result_limit) && test.testopts.result_limit > 0) {
+            if (!Number.isNaN(Number(test.testopts.result_limit)) && test.testopts.result_limit > 0) {
                 TRACE('processResult_limitedIter collecting ' + test.testopts.result_limit + ' item(s) from cursor');
                 
                 handleError = function processResult_error(err) {
@@ -663,8 +663,8 @@ function fetch(cursor, limit) {
         try {
             if (limit) {
                 limit = parseInt(limit);
-                if (isNaN(limit)) {
-                    unexpectedException("The limit value of fetch must be null ")
+                if (Number.isNaN(limit)) {
+                    unexpectedException("The limit value of fetch must be null or a number ")
                 }
             }
             if (!test.testopts) {
@@ -718,7 +718,7 @@ function bag(expected, compOpts, partial) {
     function sortFuncName(obj) {
         if (obj === undefined) {
             return 'undefined';
-        } else if (isNaN(obj) == false) {
+        } else if (Number.isNaN(Number(obj)) === false && !(obj instanceof Array)) {
             return 'Number';
         } else if (obj.name) {
             return obj.name;
@@ -742,7 +742,7 @@ function bag(expected, compOpts, partial) {
             if (right === undefined) {
                 return 0;
             } else {
-                retunr -1;
+                return -1;
             }
         
         // -- array
@@ -780,7 +780,7 @@ function bag(expected, compOpts, partial) {
         
         // -- number
         
-        } else if (isNaN(left) == false && isNaN(right) == false) {
+        } else if (Number.isNaN(Number(left)) === false && Number.isNaN(Number(right)) === false) {
             left = Number(left);
             right = Number(right);
             return left == right ? 0 : left > right;
