@@ -1,14 +1,15 @@
 # Copyright 2010-2014 RethinkDB, all rights reserved.
 
-__all__ = ['connect', 'Connection', 'Cursor']
-
 import errno
 import json
 import numbers
 import socket
 import struct
+import importlib
 
 from . import ql2_pb2 as p
+
+__all__ = ['connect', 'setLoopType', 'aconnect', 'Connection', 'Cursor']
 
 pResponse = p.Response.ResponseType
 pQuery = p.Query.QueryType
@@ -497,3 +498,17 @@ class Connection(object):
 
 def connect(host='localhost', port=28015, db=None, auth_key="", timeout=20):
     return Connection(host, port, db, auth_key, timeout)
+
+
+connectFunc = None
+
+
+def setLoopType(library):
+    global connectFunc
+    mod = importlib.import_module('.%s' % library)
+    connectFunc = mod.aconnect
+
+
+def aconnect(*args, **kw):
+    global connectFunc
+    return connectFunc(*args, **kw)

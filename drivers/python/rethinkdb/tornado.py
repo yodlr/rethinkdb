@@ -1,7 +1,5 @@
 # Copyright 2015 RethinkDB, all rights reserved.
 
-__all__ = ['connect', 'Connection', 'Cursor']
-
 import errno
 import json
 import numbers
@@ -11,31 +9,23 @@ from tornado import gen, iostream
 from tornado.ioloop import IOLoop
 
 from . import ql2_pb2 as p
-
-pResponse = p.Response.ResponseType
-pQuery = p.Query.QueryType
-
+from .net import decodeUFTPipe
 from . import repl              # For the repl connection
 from .errors import *
 from .ast import RqlQuery, RqlTopLevelQuery, DB
 from .ast import recursively_convert_pseudotypes
+
+__all__ = ['aconnect', 'Connection', 'Cursor']
+
+pResponse = p.Response.ResponseType
+pQuery = p.Query.QueryType
+
 
 try:
     {}.iteritems
     dict_items = lambda d: d.iteritems()
 except AttributeError:
     dict_items = lambda d: d.items()
-
-
-def decodeUFTPipe(inputPipe):
-    # attempt to decode input as utf-8 with fallbacks to get something useful
-    try:
-        return inputPipe.decode('utf-8', errors='ignore')
-    except TypeError:
-        try:
-            return inputPipe.decode('utf-8')
-        except UnicodeError:
-            return repr(inputPipe)
 
 
 class Query(object):
@@ -519,7 +509,7 @@ class Connection(object):
 
 
 @gen.coroutine
-def connect(*args, **kwargs):
+def aconnect(*args, **kwargs):
     if 'io_loop' in kwargs:
         io_loop = kwargs[io_loop]
     else:
