@@ -5,7 +5,11 @@ import json
 import numbers
 import socket
 import struct
-import importlib
+try:
+    from importlib import import_module
+except ImportError:
+    def import_module(name):
+        return __import__(name, globals(), locals(), [], -1)
 
 from . import ql2_pb2 as p
 
@@ -505,7 +509,7 @@ connectFunc = None
 
 def setLoopType(library):
     global connectFunc
-    mod = importlib.import_module('.%s' % library)
+    mod = import_module('.%s' % library)
     connectFunc = mod.aconnect
 
 
