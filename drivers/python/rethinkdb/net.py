@@ -9,9 +9,9 @@ try:
     from importlib import import_module
 except ImportError:
     def import_module(name):
-        localized = __name__[:-4]
-        print(localized)
-        return __import__(localized + name, globals(), locals(), [], -1)
+        # song & dance needed to do relative import in 2.6, which
+        # doesn't have importlib
+        return __import__(name[1:], globals(), locals(), [], 1)
 
 from . import ql2_pb2 as p
 
