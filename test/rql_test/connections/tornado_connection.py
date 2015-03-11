@@ -15,7 +15,7 @@ import tempfile
 import time
 import traceback
 import unittest
-from tornado import gen
+from tornado import gen, ioloop
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                 os.pardir, os.pardir, "common"))
@@ -84,6 +84,10 @@ def closeSharedServer():
     sharedServerDriverPort = None
 
 
+def just_do(coroutine):
+    ioloop.IOLoop.instance().run_sync(coroutine)
+
+
 # == Test Base Classes
 
 class TestCaseCompatible(unittest.TestCase):
@@ -137,17 +141,19 @@ class TestWithConnection(TestCaseCompatible):
     port = None
     server = None
     serverOutput = None
+    ioloop = None
 
+    @gen.coroutine
     def setUp(self):
         global sharedServer, sharedServerOutput, sharedServerHost, \
             sharedServerDriverPort
 
         if sharedServer is not None:
             try:
-                sharedServer.check().result()
+                yield sharedServer.check()
             except Exception:
                 # ToDo: figure out how to blame the last test
-                closeSharedServer()
+                yield closeSharedServer()
 
         if sharedServerDriverPort is None:
             sharedServerOutput = tempfile.NamedTemporaryFile('w+')
@@ -159,17 +165,56 @@ class TestWithConnection(TestCaseCompatible):
 
         # - insure we are ready
 
-        checkSharedServer()
+        yield checkSharedServer()
 
+    # can't use standard TestCase run here because async.
+    def run(self, result=None):
+        if result is None:
+            result = self.defaultTestResult()
+        result.startTest(self)
+        testMethod = getattr(self, self._testMethodName)
+        try:
+            try:
+                just_do(self.setUp)
+            except KeyboardInterrupt:
+                raise
+            except:
+                result.addError(self, self._exc_info())
+                return
+
+            ok = False
+            try:
+                just_do(testMethod)
+                ok = True
+            except self.failureException:
+                result.addFailure(self, self._exc_info())
+            except KeyboardInterrupt:
+                raise
+            except:
+                result.addError(self, self._exc_info())
+
+            try:
+                just_do(self.tearDown)
+            except KeyboardInterrupt:
+                raise
+            except:
+                result.addError(self, self._exc_info())
+                ok = False
+            if ok:
+                result.addSuccess(self)
+        finally:
+            result.stopTest(self)
+
+    @gen.coroutine
     def tearDown(self):
         global sharedServer, sharedServerOutput, sharedServerHost, \
             sharedServerDriverPort
 
         if sharedServerDriverPort is not None:
             try:
-                checkSharedServer()
+                yield checkSharedServer()
             except Exception:
-                closeSharedServer()
+                yield closeSharedServer()
                 raise  # ToDo: figure out how to best give the server log
 
 # == Test Classes
