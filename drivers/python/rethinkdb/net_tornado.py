@@ -250,7 +250,7 @@ class SocketWrapper(object):
         except:
             self.close()
             raise
-        yield gen.Return(res)
+        raise gen.Return(res)
 
     @gen.coroutine
     def sendall(self, data):

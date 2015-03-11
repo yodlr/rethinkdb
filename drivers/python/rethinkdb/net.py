@@ -511,7 +511,7 @@ connectFunc = None
 
 def setLoopType(library):
     global connectFunc
-    mod = import_module('.%s' % library)
+    mod = import_module('.net_%s' % library)
     connectFunc = mod.aconnect
 
 
