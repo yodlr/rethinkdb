@@ -9,7 +9,9 @@ try:
     from importlib import import_module
 except ImportError:
     def import_module(name):
-        return __import__(name, globals(), locals(), [], -1)
+        localized = __name__[:-4]
+        print(localized)
+        return __import__(localized + name, globals(), locals(), [], -1)
 
 from . import ql2_pb2 as p
 
