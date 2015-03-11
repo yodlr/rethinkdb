@@ -507,10 +507,6 @@ if __name__ == '__main__':
     print("Running py connection tests")
     suite = unittest.TestSuite()
     loader = unittest.TestLoader()
-    suite.addTest(loader.loadTestsFromTestCase(TestNoConnection))
-    if use_default_port:
-        suite.addTest(loader.loadTestsFromTestCase(TestConnectionDefaultPort))
-    suite.addTest(loader.loadTestsFromTestCase(TestAuthConnection))
     suite.addTest(loader.loadTestsFromTestCase(TestConnection))
     suite.addTest(TestPrinting())
     suite.addTest(TestBatching())
