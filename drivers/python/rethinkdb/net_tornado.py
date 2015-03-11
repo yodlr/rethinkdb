@@ -5,6 +5,7 @@ import json
 import numbers
 import socket
 import struct
+import datetime
 from tornado import gen, iostream
 from tornado.ioloop import IOLoop
 
@@ -412,10 +413,13 @@ class Connection(object):
                 # expected length of this response.
                 if self._header_in_progress is None:
                     self._header_in_progress \
-                        = yield self._socket.recvall(12, timeout)
+                        = yield with_relative_timeout(timeout,
+                                                      self._socket.recvall(12))
                 (response_token, response_len,) \
                     = struct.unpack("<qL", self._header_in_progress)
-                response_buf = self._socket.recvall(response_len, timeout)
+                response_buf \
+                    = yield with_relative_timeout(timeout,
+                                                  self._socket.recvall(response_len))
                 self._header_in_progress = None
             except KeyboardInterrupt as err:
                 # When interrupted while waiting for a response,
@@ -504,6 +508,19 @@ class Connection(object):
 
 
 @gen.coroutine
+def with_relative_timeout(secs, generator, io_loop=None):
+    if secs is None:
+        value = yield generator
+        raise gen.Return(value)
+    else:
+        if io_loop is None:
+            io_loop = IOLoop.current()
+        value = yield gen.with_timeout(datetime.timedelta(seconds=secs),
+                                       generator, io_loop=io_loop)
+        raise gen.Return(value)
+
+
+@gen.coroutine
 def aconnect(*args, **kwargs):
     if 'io_loop' in kwargs:
         io_loop = kwargs['io_loop']
@@ -512,7 +529,8 @@ def aconnect(*args, **kwargs):
     if 'timeout' in kwargs:
         timeout = kwargs['timeout']
     else:
-        timeout = 20000
+        timeout = 20
     protocol = Connection(*args, **kwargs)
-    yield gen.with_timeout(timeout, protocol.reconnect(), io_loop=io_loop)
+    yield with_relative_timeout(timeout, protocol.reconnect(),
+                                io_loop=io_loop)
     raise gen.Return(protocol)
