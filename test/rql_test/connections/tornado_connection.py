@@ -63,7 +63,7 @@ def checkSharedServer():
     if sharedServerDriverPort is not None:
         conn = yield r.aconnect(host=sharedServerHost,
                                 port=sharedServerDriverPort)
-        if 'test' not in (yield r.db_list().arun(conn)):
+        if 'test' not in (yield r.db_list().run(conn)):
             yield r.db_create('test').run(conn)
 
 
