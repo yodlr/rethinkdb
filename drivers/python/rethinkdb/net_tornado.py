@@ -159,10 +159,9 @@ class Cursor(object):
 
 
 class SocketWrapper(object):
-    def __init__(self, host, port, auth_key, connect_timeout, io_loop=None):
+    def __init__(self, host, port, auth_key, io_loop=None):
         self.host = host
         self.port = port
-        self.connect_timeout = connect_timeout
         self.io_loop = io_loop
         if self.io_loop is None:
             self.io_loop = IOLoop.current()
@@ -179,10 +178,7 @@ class SocketWrapper(object):
         try:
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
             self._stream = iostream.IOStream(self._socket)
-            yield gen.with_timeout(self.connect_timeout,
-                                   self._stream.connect((self.host,
-                                                         self.port)),
-                                   io_loop=self.io_loop)
+            yield self._stream.connect((self.host, self.port))
 
             # Send our initial handshake
             yield self.sendall(
@@ -197,14 +193,12 @@ class SocketWrapper(object):
 
             response = b""
             while True:
-                char = yield gen.with_timeout(self.connect_timeout,
-                                              self.recvall(1),
-                                              io_loop=self.io_loop)
+                char = yield self.recvall(1)
                 if char == b"\0":
                     break
                 response += char
         except RqlDriverError as err:
-            yield self.close()
+            yield self.aclose()
             error = str(err)\
                 .replace('receiving from', 'during handshake with')\
                 .replace('sending to', 'during handshake with')
@@ -511,9 +505,13 @@ class Connection(object):
 @gen.coroutine
 def aconnect(*args, **kwargs):
     if 'io_loop' in kwargs:
-        io_loop = kwargs[io_loop]
+        io_loop = kwargs['io_loop']
     else:
         io_loop = IOLoop.current()
+    if 'timeout' in kwargs:
+        timeout = kwargs['timeout']
+    else:
+        timeout = 20000
     protocol = Connection(*args, **kwargs)
     yield gen.with_timeout(timeout, protocol.reconnect(), io_loop=io_loop)
     raise gen.Return(protocol)
