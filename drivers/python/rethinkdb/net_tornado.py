@@ -208,7 +208,7 @@ class SocketWrapper(object):
                                  (self.host, self.port, err))
 
         if response != b"SUCCESS":
-            yield self.close()
+            yield self.aclose()
             raise RqlDriverError(("Server dropped connection " +
                                   "with message: \"%s\"") %
                                  decodeUFTPipe(response).strip())
@@ -230,19 +230,19 @@ class SocketWrapper(object):
             res = yield self._stream.read_bytes(length)
         except IOError as err:
             if err.errno == errno.ECONNRESET:
-                yield self.close()
+                yield self.aclose()
                 raise RqlDriverError("Connection is closed.")
             elif err.errno != errno.EINTR:
-                yield self.close()
+                yield self.aclose()
                 raise RqlDriverError(('Connection interrupted ' +
                                       'receiving from %s:%s - %s') %
                                      (self.host, self.port, str(err)))
         except Exception as err:
-            self.close()
+            yield self.aclose()
             raise RqlDriverError('Error receiving from %s:%s - %s' %
                                  (self.host, self.port, str(err)))
         except:
-            self.close()
+            yield self.aclose()
             raise
         raise gen.Return(res)
 
@@ -252,19 +252,19 @@ class SocketWrapper(object):
             yield self._stream.write(data)
         except IOError as err:
             if err.errno == errno.ECONNRESET:
-                yield self.close()
+                yield self.aclose()
                 raise RqlDriverError("Connection is closed.")
             elif err.errno != errno.EINTR:
-                yield self.close()
+                yield self.aclose()
                 raise RqlDriverError(('Connection interrupted ' +
                                       'sending to %s:%s - %s') %
                                      (self.host, self.port, str(err)))
         except Exception as err:
-            self.close()
+            self.aclose()
             raise RqlDriverError('Error sending to %s:%s - %s' %
                                  (self.host, self.port, str(err)))
         except:
-            self.close()
+            self.aclose()
             raise
 
 
@@ -277,6 +277,7 @@ class Connection(object):
         self._cursor_cache = {}
         self.closing = False
         self.db = db
+        self._io_loop = io_loop
 
         # Used to interrupt and resume reading from the socket
         self._header_in_progress = None
@@ -288,7 +289,7 @@ class Connection(object):
             raise RqlDriverError("Could not convert port %s to an integer."
                                  % port)
 
-        self._socket = SocketWrapper(host, port, auth_key, timeout)
+        self._socket = SocketWrapper(host, port, auth_key, io_loop=io_loop)
 
     def __enter__(self):
         return self
@@ -305,7 +306,7 @@ class Connection(object):
 
     @gen.coroutine
     def reconnect(self, noreply_wait=True):
-        yield self.close(noreply_wait)
+        yield self.aclose(noreply_wait)
         yield self._socket.reconnect()
 
     def is_open(self):
@@ -328,7 +329,7 @@ class Connection(object):
 
     # synchronous close operation for __exit__ mostly.
     def close(self, noreply_wait=True):
-        return self.aclose().result()
+        return self.io_loop.run_sync(self.aclose())
 
     @gen.coroutine
     def noreply_wait(self):
