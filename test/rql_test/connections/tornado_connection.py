@@ -221,21 +221,27 @@ class TestWithConnection(TestCaseCompatible):
 
 
 class TestConnection(TestWithConnection):
+    @gen.coroutine
     def test_connect_close_reconnect(self):
-        c = r.connect(host=sharedServerHost, port=sharedServerDriverPort)
-        r.expr(1).run(c)
-        c.close()
-        c.close()
-        c.reconnect()
-        r.expr(1).run(c)
+        c = yield r.aconnect(host=sharedServerHost,
+                             port=sharedServerDriverPort)
+        yield r.expr(1).run(c)
+        yield c.close()
+        yield c.close()
+        yield c.reconnect()
+        yield r.expr(1).run(c)
 
+    @gen.coroutine
     def test_connect_close_expr(self):
-        c = r.connect(host=sharedServerHost, port=sharedServerDriverPort)
-        r.expr(1).run(c)
-        c.close()
-        self.assertRaisesRegexp(
-            r.RqlDriverError, "Connection is closed.",
-            r.expr(1).run, c)
+        c = yield r.aconnect(host=sharedServerHost,
+                             port=sharedServerDriverPort)
+        yield r.expr(1).run(c)
+        yield c.close()
+        try:
+            yield r.expr(1).run(c)
+            self.fail("Didn't raise exception")
+        except r.RqlDriverError as e:
+            self.assertTrue(re.search("Connection is closed.", str(e)))
 
     def test_noreply_wait_waits(self):
         c = r.connect(host=sharedServerHost, port=sharedServerDriverPort)
