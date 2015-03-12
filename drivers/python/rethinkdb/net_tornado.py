@@ -199,7 +199,7 @@ class SocketWrapper(object):
                     break
                 response += char
         except RqlDriverError as err:
-            yield self.close()
+            yield self.aclose()
             error = str(err)\
                 .replace('receiving from', 'during handshake with')\
                 .replace('sending to', 'during handshake with')
@@ -209,7 +209,7 @@ class SocketWrapper(object):
                                  (self.host, self.port, err))
 
         if response != b"SUCCESS":
-            yield self.close()
+            yield self.aclose()
             raise RqlDriverError(("Server dropped connection " +
                                   "with message: \"%s\"") %
                                  decodeUFTPipe(response).strip())
@@ -232,19 +232,19 @@ class SocketWrapper(object):
             res = yield self._stream.read_bytes(length)
         except IOError as err:
             if err.errno == errno.ECONNRESET:
-                yield self.close()
+                yield self.aclose()
                 raise RqlDriverError("Connection is closed.")
             elif err.errno != errno.EINTR:
-                yield self.close()
+                yield self.aclose()
                 raise RqlDriverError(('Connection interrupted ' +
                                       'receiving from %s:%s - %s') %
                                      (self.host, self.port, str(err)))
         except Exception as err:
-            yield self.close()
+            yield self.aclose()
             raise RqlDriverError('Error receiving from %s:%s - %s' %
                                  (self.host, self.port, str(err)))
         except:
-            yield self.close()
+            yield self.aclose()
             raise
         raise gen.Return(res)
 
@@ -254,19 +254,19 @@ class SocketWrapper(object):
             yield self._stream.write(data)
         except IOError as err:
             if err.errno == errno.ECONNRESET:
-                yield self.close()
+                yield self.aclose()
                 raise RqlDriverError("Connection is closed.")
             elif err.errno != errno.EINTR:
-                yield self.close()
+                yield self.aclose()
                 raise RqlDriverError(('Connection interrupted ' +
                                       'sending to %s:%s - %s') %
                                      (self.host, self.port, str(err)))
         except Exception as err:
-            yield self.close()
+            yield self.aclose()
             raise RqlDriverError('Error sending to %s:%s - %s' %
                                  (self.host, self.port, str(err)))
         except:
-            yield self.close()
+            yield self.aclose()
             raise
 
 
@@ -324,7 +324,7 @@ class Connection(object):
                 if noreply_wait:
                     yield self.noreply_wait()
             finally:
-                yield self._socket.close()
+                yield self._socket.aclose()
         for token, cursor in dict_items(self._cursor_cache):
             cursor._error("Connection is closed.")
         self._cursor_cache = {}
