@@ -215,7 +215,7 @@ class SocketWrapper(object):
                                  decodeUFTPipe(response).strip())
 
     @gen.coroutine
-    def close(self):
+    def aclose(self):
         if self._stream is not None:
             try:
                 yield self._stream.close()
