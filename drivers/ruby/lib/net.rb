@@ -9,6 +9,72 @@ module RethinkDB
     end
   end
 
+  class Handler
+    def on_error(err)
+      raise err
+    end
+    def on_array(arr)
+      arr.each{|x| on_stream_val(x)}
+    end
+    def on_atom(val)
+      on_val(val) if respond_to?(:on_val)
+    end
+    def on_stream_val(val)
+      on_val(val) if respond_to?(:on_val)
+    end
+
+    def on_change_error(err_str)
+      on_stream_val({'error' => err_str}) if respond_to?(:on_stream_val)
+    end
+    def on_initial_val(val)
+      on_stream_val({'new_val' => val}) if respond_to?(:on_stream_val)
+    end
+    def on_state(state)
+      on_stream_val({'state' => state}) if respond_to?(:on_stream_val)
+    end
+    def on_change(old_val, new_val)
+      if respond_to?(:on_stream_val)
+        on_stream_val({'old_val' => old_val, 'new_val' => new_val})
+      end
+    end
+    def on_unrecognized_change(val)
+      if respond_to?(:on_stream_val)
+        on_stream_val(val)
+      else
+        on_error(RqlDriverError.new("Received object with unrecognized format, " +
+                                    "is the server newer than the driver?\n" +
+                                    val.inspect))
+      end
+    end
+  end
+
+  class CallbackHandler < Handler
+    def initialize(callback)
+      if callback.arity > 2
+        raise ArgumentError, "Wrong number of arguments for callback (callback " +
+          "accepts #{callback.arity} arguments, but it should accept 0, 1 or 2)."
+      end
+      @callback = callback
+    end
+    def do_call(err, val)
+      if @callback.arity == 0
+        raise err if err
+        @callback.call
+      elsif @callback.arity == 1
+        raise err if err
+        @callback.call(val)
+      elsif @callback.arity == 2 || @callback.arity == -1
+        @callback.call(err, val)
+      end
+    end
+    def on_val(x)
+      do_call(nil, x)
+    end
+    def on_error(err)
+      do_call(err, nil)
+    end
+  end
+
   class RQL
     @@default_conn = nil
     def self.set_default_conn c; @@default_conn = c; end
@@ -16,7 +82,6 @@ module RethinkDB
       unbound_if(@body == RQL)
       c, opts = @@default_conn, c if !opts && !c.kind_of?(RethinkDB::Connection)
       opts = {} if !opts
-      opts = {opts => true} if opts.class != Hash
       if (tf = opts[:time_format])
         opts[:time_format] = (tf = tf.to_s)
         if tf != 'raw' && tf != 'native'
@@ -41,6 +106,80 @@ module RethinkDB
       end
       c.run(@body, opts, &b)
     end
+    def em_run(*a, &b)
+      if b
+        args = a
+        handler = CallbackHandler.new(b)
+      else
+        args = a[0...-1]
+        h = a[-1]
+        h = h.new if h.is_a? Class
+        if h.is_a? Handler
+          handler = h
+        elsif h.is_a? Proc
+          handler = CallbackHandler.new(h)
+        else
+          raise ArgumentError, "Argument error: `em_run` requires a block, a Proc " +
+            "as its last argument, the name a subclass of `RethinkDB::Handler` " +
+            "as its last argument, or an instance of a subclass of " +
+            "`RethinkDB::Handler` as its last argument " +
+            "(got #{h} of class #{h.class} instead)."
+        end
+      end
+
+      # If the user has overridden the `on_state` method, we assume they want states.
+      if handler.method(:on_state).owner != Handler
+        if args[-1].is_a?(Hash)
+          args[-1] = args[-1].merge(include_states: true)
+        else
+          args << {include_states: true}
+        end
+      end
+
+      fiber = Fiber.new {
+        while true
+          msg = Fiber.yield
+          handler.send(*msg) if handler.respond_to?(msg[0])
+        end
+      }
+      fiber.resume # hit first yield
+      EM.defer {
+        begin
+          res = run(*args)
+          EM.next_tick{fiber.resume(:on_open)}
+          if res.is_a?(Cursor)
+            if res.is_cfeed?
+              res.each{|change|
+                if change.has_key?('new_val') && change.has_key?('old_val')
+                  EM.next_tick {
+                    fiber.resume(:on_change, change['old_val'], change['new_val'])
+                  }
+                elsif change.has_key?('new_val') && !change.has_key?('old_val')
+                  EM.next_tick{fiber.resume(:on_initial_val, change['new_val'])}
+                elsif change.has_key?('error')
+                  EM.next_tick{fiber.resume(:on_change_error, change['error'])}
+                elsif change.has_key?('state')
+                  EM.next_tick{fiber.resume(:on_state)}
+                else
+                  EM.next_tick{fiber.resume(:on_unrecognized_change, change)}
+                end
+              }
+            else
+              res.each{|val|
+                EM.next_tick{fiber.resume(:on_stream_val, val)}
+              }
+            end
+          elsif res.is_a?(Array)
+            EM.next_tick{fiber.resume(:on_array, res)}
+          else
+            EM.next_tick{fiber.resume(:on_atom, res)}
+          end
+        rescue Exception => err
+          EM.next_tick{fiber.resume(:on_error, err)}
+        end
+        EM.next_tick{fiber.resume(:on_close)}
+      }
+    end
   end
 
   class Cursor
@@ -61,8 +200,9 @@ module RethinkDB
         (@run ? "" : "\n#{preview}") + ">"
     end
 
-    def initialize(results, msg, connection, opts, token, more = true) # :nodoc:
+    def initialize(results, msg, connection, opts, token, is_cfeed, more) # :nodoc:
       @more = more
+      @is_cfeed = is_cfeed
       @results = results
       @msg = msg
       @run = false
@@ -72,6 +212,8 @@ module RethinkDB
       @token = token
       fetch_batch
     end
+
+    def is_cfeed?; @is_cfeed; end
 
     def each(&block) # :nodoc:
       raise RqlRuntimeError, "Can only iterate over a cursor once." if @run
@@ -199,12 +341,16 @@ module RethinkDB
 
       res = run_internal(q, all_opts, token)
       return res if !res
+      is_cfeed = (res['n'] & [Response::ResponseNote::SEQUENCE_FEED,
+                              Response::ResponseNote::ATOM_FEED,
+                              Response::ResponseNote::ORDER_BY_LIMIT_FEED,
+                              Response::ResponseNote::UNIONED_FEED]) != []
       if res['t'] == Response::ResponseType::SUCCESS_PARTIAL
         value = Cursor.new(Shim.response_to_native(res, msg, opts),
-                           msg, self, opts, token, true)
+                           msg, self, opts, token, is_cfeed, true)
       elsif res['t'] == Response::ResponseType::SUCCESS_SEQUENCE
         value = Cursor.new(Shim.response_to_native(res, msg, opts),
-                   msg, self, opts, token, false)
+                   msg, self, opts, token, is_cfeed, false)
       else
         value = Shim.response_to_native(res, msg, opts)
       end
