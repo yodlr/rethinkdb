@@ -391,7 +391,7 @@ class TestConnection(TestWithConnection):
 
         yield r.expr(1).run()
 
-        yield c.repl()                # is idempotent
+        c.repl()                # is idempotent
 
         yield r.expr(1).run()
 
