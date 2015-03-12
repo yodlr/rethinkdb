@@ -129,6 +129,7 @@ class Cursor(object):
 
         raise RqlDriverError("Invalid wait timeout '%s'" % str(wait))
 
+    @gen.coroutine
     def next(self, **kwargs):
         timeout = self._wait_to_timeout(kwargs.get('wait', True))
 
@@ -137,8 +138,8 @@ class Cursor(object):
                 try:
                     if timeout == 0:
                         raise socket.timeout()
-                    response = self.conn._read_response(self.query.token,
-                                                        timeout)
+                    response = yield self.conn._read_response(self.query.token,
+                                                              timeout)
                     self.conn._handle_cursor_response(response)
                 except socket.timeout:
                     raise RqlDriverError("Timed out waiting for " +
@@ -147,7 +148,7 @@ class Cursor(object):
                     raise RqlDriverError("Internal error, missing" +
                                          " cursor response.")
 
-        return next(self.it)
+        raise gen.Return(next(self.it))
 
     def __next__(self):
         return next(self.it)
