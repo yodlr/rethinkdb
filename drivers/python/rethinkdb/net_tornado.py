@@ -279,6 +279,8 @@ class Connection(object):
         self.closing = False
         self.db = db
         self._io_loop = io_loop
+        if self._io_loop is None:
+            self._io_loop = IOLoop.current()
 
         # Used to interrupt and resume reading from the socket
         self._header_in_progress = None
@@ -296,7 +298,7 @@ class Connection(object):
         return self
 
     def __exit__(self, type, value, traceback):
-        self.close(noreply_wait=False)
+        self._io_loop.add_future(self.aclose(noreply_wait=False))
 
     def use(self, db):
         self.db = db
@@ -327,10 +329,6 @@ class Connection(object):
         self._cursor_cache = {}
         self._header_in_progress = None
         self.closing = False
-
-    # synchronous close operation for __exit__ mostly.
-    def close(self, noreply_wait=True):
-        return self.io_loop.run_sync(self.aclose())
 
     @gen.coroutine
     def noreply_wait(self):
