@@ -509,7 +509,7 @@ def connect(host='localhost', port=28015, db=None, auth_key="", timeout=20):
 connectFunc = None
 
 
-def setLoopType(library):
+def set_loop_type(library):
     global connectFunc
     mod = import_module('.net_%s' % library)
     connectFunc = mod.aconnect

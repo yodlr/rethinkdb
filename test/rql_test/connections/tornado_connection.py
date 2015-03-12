@@ -34,7 +34,7 @@ r = utils.import_python_driver()
 
 # -- use tornado subdriver
 
-r.setLoopType("tornado")
+r.set_loop_type("tornado")
 
 # -- get settings
 
