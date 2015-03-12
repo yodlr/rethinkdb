@@ -75,7 +75,7 @@ def closeSharedServer():
 
     if sharedServer is not None:
         try:
-            yield sharedServer.aclose()
+            sharedServer.close()
         except Exception as e:
             sys.stderr.write('Got error while shutting down server: %s'
                              % str(e))
