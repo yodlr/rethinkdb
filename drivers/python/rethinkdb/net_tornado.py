@@ -193,12 +193,7 @@ class SocketWrapper(object):
             # Read out the response from the server, which will be a
             # null-terminated string
 
-            response = b""
-            while True:
-                char = yield self.recvall(1)
-                if char == b"\0":
-                    break
-                response += char
+            response = (yield self.recvto(b"\0"))[:-1]
         except RqlDriverError as err:
             yield self.aclose()
             error = str(err)\
@@ -226,6 +221,28 @@ class SocketWrapper(object):
             finally:
                 self._socket = None
                 self._stream = None
+
+    @gen.coroutine
+    def recvto(self, delimiter):
+        try:
+            res = yield self._stream.read_until(delimiter)
+        except IOError as err:
+            if err.errno == errno.ECONNRESET:
+                yield self.aclose()
+                raise RqlDriverError("Connection is closed.")
+            elif err.errno != errno.EINTR:
+                yield self.aclose()
+                raise RqlDriverError(('Connection interrupted ' +
+                                      'receiving from %s:%s - %s') %
+                                     (self.host, self.port, str(err)))
+        except Exception as err:
+            yield self.aclose()
+            raise RqlDriverError('Error receiving from %s:%s - %s' %
+                                 (self.host, self.port, str(err)))
+        except:
+            yield self.aclose()
+            raise
+        raise gen.Return(res)
 
     @gen.coroutine
     def recvall(self, length):
