@@ -231,6 +231,21 @@ class TestWithConnection(TestCaseCompatible):
                       % (repr(generator), repr(exception)))
 
     @gen.coroutine
+    def asyncAssertRaises(self, exception, generator):
+        try:
+            yield generator
+        except Exception as e:
+            self.assertTrue(isinstance(e, exception),
+                            '%s expected to raise %s but '
+                            'instead raised %s: %s\n%s'
+                            % (repr(generator), repr(exception),
+                               e.__class__.__name__, str(e),
+                               traceback.format_exc()))
+        else:
+            self.fail('%s failed to raise a %s'
+                      % (repr(generator), repr(exception)))
+
+    @gen.coroutine
     def tearDown(self):
         global sharedServer, sharedServerOutput, sharedServerHost, \
             sharedServerDriverPort
@@ -433,24 +448,25 @@ class TestShutdown(TestWithConnection):
         yield gen.sleep(0.2)
 
         yield self.asyncAssertRaisesRegexp(r.RqlDriverError,
-                                           "Connection is closed.",
+                                           "Connection interrupted receiving.*.",
                                            r.expr(1).run(c))
 
 
 # Another non-connection connection test. It's to test that get_intersecting()
 # batching works properly.
 class TestGetIntersectingBatching(TestWithConnection):
+    @gen.coroutine
     def runTest(self):
+        c = r.aconnect(host=sharedServerHost,
+                       port=sharedServerDriverPort)
 
-        c = r.connect(host=sharedServerHost, port=sharedServerDriverPort)
-
-        if 't1' in r.db('test').table_list().run(c):
-            r.db('test').table_drop('t1').run(c)
-        r.db('test').table_create('t1').run(c)
+        if 't1' in (yield r.db('test').table_list().run(c)):
+            yield r.db('test').table_drop('t1').run(c)
+        yield r.db('test').table_create('t1').run(c)
         t1 = r.db('test').table('t1')
 
-        t1.index_create('geo', geo=True).run(c)
-        t1.index_wait('geo').run(c)
+        yield t1.index_create('geo', geo=True).run(c)
+        yield t1.index_wait('geo').run(c)
 
         batch_size = 3
         point_count = 500
@@ -477,8 +493,8 @@ class TestGetIntersectingBatching(TestWithConnection):
             polygons.append({'geo': r.circle([random.uniform(-180.0, 180.0),
                                               random.uniform(-90.0, 90.0)],
                                              1000000)})
-        t1.insert(points).run(c)
-        t1.insert(polygons).run(c)
+        yield t1.insert(points).run(c)
+        yield t1.insert(polygons).run(c)
 
         # Check that the results are actually lazy at least some of
         # the time While the test is randomized, chances are extremely
@@ -490,33 +506,35 @@ class TestGetIntersectingBatching(TestWithConnection):
                                      random.uniform(-90.0, 90.0)], 8000000)
             reference = t1.filter(r.row['geo'].intersects(query_circle))\
                           .coerce_to("ARRAY").run(c)
-            cursor = t1.get_intersecting(query_circle, index='geo')\
-                       .run(c, max_batch_rows=batch_size)
+            cursor = yield t1.get_intersecting(query_circle, index='geo')\
+                             .run(c, max_batch_rows=batch_size)
             if not cursor.end_flag:
                 seen_lazy = True
 
             itr = iter(cursor)
             while len(reference) > 0:
-                row = next(itr)
+                row = yield next(itr)
                 self.assertEqual(reference.count(row), 1)
                 reference.remove(row)
-            self.assertRaises(StopIteration, lambda: next(itr))
+            self.asyncAssertRaises(StopIteration, next(itr))
             self.assertTrue(cursor.end_flag)
 
         self.assertTrue(seen_lazy)
 
-        r.db('test').table_drop('t1').run(c)
+        yield r.db('test').table_drop('t1').run(c)
 
 
 class TestBatching(TestWithConnection):
+    @gen.coroutine
     def runTest(self):
-        c = r.connect(host=sharedServerHost, port=sharedServerDriverPort)
+        c = yield r.aconnect(host=sharedServerHost,
+                             port=sharedServerDriverPort)
 
         # Test the cursor API when there is exactly mod batch size
         # elements in the result stream
-        if 't1' in r.db('test').table_list().run(c):
-            r.db('test').table_drop('t1').run(c)
-        r.db('test').table_create('t1').run(c)
+        if 't1' in (yield r.db('test').table_list().run(c)):
+            yield r.db('test').table_drop('t1').run(c)
+        yield r.db('test').table_create('t1').run(c)
         t1 = r.table('t1')
 
         batch_size = 3
@@ -524,27 +542,29 @@ class TestBatching(TestWithConnection):
 
         ids = set(xrange(0, count))
 
-        t1.insert([{'id': i} for i in ids]).run(c)
-        cursor = t1.run(c, max_batch_rows=batch_size)
+        yield t1.insert([{'id': i} for i in ids]).run(c)
+        cursor = yield t1.run(c, max_batch_rows=batch_size)
 
         itr = iter(cursor)
         for i in xrange(0, count - 1):
-            row = next(itr)
+            row = yield next(itr)
             ids.remove(row['id'])
 
-        self.assertEqual(next(itr)['id'], ids.pop())
-        self.assertRaises(StopIteration, lambda: next(itr))
+        self.assertEqual((yield next(itr)['id']), ids.pop())
+        self.asyncAssertRaises(StopIteration, next(itr))
         self.assertTrue(cursor.end_flag)
-        r.db('test').table_drop('t1').run(c)
+        yield r.db('test').table_drop('t1').run(c)
 
 
 class TestGroupWithTimeKey(TestWithConnection):
+    @gen.coroutine
     def runTest(self):
-        c = r.connect(host=sharedServerHost, port=sharedServerDriverPort)
+        c = r.aconnect(host=sharedServerHost,
+                       port=sharedServerDriverPort)
 
-        if 'times' in r.db('test').table_list().run(c):
-            r.db('test').table_drop('times').run(c)
-        r.db('test').table_create('times').run(c)
+        if 'times' in (yield r.db('test').table_list().run(c)):
+            yield r.db('test').table_drop('times').run(c)
+        yield r.db('test').table_create('times').run(c)
 
         time1 = 1375115782.24
         rt1 = r.epoch_time(time1).in_timezone('+00:00')
@@ -553,40 +573,42 @@ class TestGroupWithTimeKey(TestWithConnection):
         rt2 = r.epoch_time(time2).in_timezone('+00:00')
         dt2 = datetime.datetime.fromtimestamp(time2, r.ast.RqlTzinfo('+00:00'))
 
-        res = r.table('times').insert({'id': 0, 'time': rt1}).run(c)
+        res = yield r.table('times').insert({'id': 0, 'time': rt1}).run(c)
         self.assertEqual(res['inserted'], 1)
-        res = r.table('times').insert({'id': 1, 'time': rt2}).run(c)
+        res = yield r.table('times').insert({'id': 1, 'time': rt2}).run(c)
         self.assertEqual(res['inserted'], 1)
 
         expected_row1 = {'id': 0, 'time': dt1}
         expected_row2 = {'id': 1, 'time': dt2}
 
-        groups = r.table('times').group('time').coerce_to('array').run(c)
+        groups = yield r.table('times').group('time').coerce_to('array').run(c)
         self.assertEqual(groups, {dt1: [expected_row1],
                                   dt2: [expected_row2]})
 
 
 class TestSuccessAtomFeed(TestWithConnection):
+    @gen.coroutine
     def runTest(self):
-        c = r.connect(host=sharedServerHost, port=sharedServerDriverPort)
+        c = yield r.aconnect(host=sharedServerHost,
+                             port=sharedServerDriverPort)
 
         from rethinkdb import ql2_pb2 as p
 
-        if 'success_atom_feed' in r.db('test').table_list().run(c):
-            r.db('test').table_drop('success_atom_feed').run(c)
-        r.db('test').table_create('success_atom_feed').run(c)
+        if 'success_atom_feed' in (yield r.db('test').table_list().run(c)):
+            yield r.db('test').table_drop('success_atom_feed').run(c)
+        yield r.db('test').table_create('success_atom_feed').run(c)
         t1 = r.db('test').table('success_atom_feed')
 
-        res = t1.insert({'id': 0, 'a': 16}).run(c)
+        res = yield t1.insert({'id': 0, 'a': 16}).run(c)
         self.assertEqual(res['inserted'], 1)
-        res = t1.insert({'id': 1, 'a': 31}).run(c)
+        res = yield t1.insert({'id': 1, 'a': 31}).run(c)
         self.assertEqual(res['inserted'], 1)
 
-        t1.index_create('a', lambda x: x['a']).run(c)
-        t1.index_wait('a').run(c)
+        yield t1.index_create('a', lambda x: x['a']).run(c)
+        yield t1.index_wait('a').run(c)
 
         self.assertEqual(p.Response.ResponseType.SUCCESS_ATOM_FEED,
-                         t1.get(0).changes().run(c).responses[0].type)
+                         (yield t1.get(0).changes().run(c).responses[0].type))
 
 
 if __name__ == '__main__':
@@ -594,10 +616,10 @@ if __name__ == '__main__':
     suite = unittest.TestSuite()
     loader = unittest.TestLoader()
     suite.addTest(loader.loadTestsFromTestCase(TestConnection))
-    #suite.addTest(TestBatching())
-    #suite.addTest(TestGetIntersectingBatching())
-    #suite.addTest(TestGroupWithTimeKey())
-    #suite.addTest(TestSuccessAtomFeed())
+    suite.addTest(TestBatching())
+    suite.addTest(TestGetIntersectingBatching())
+    suite.addTest(TestGroupWithTimeKey())
+    suite.addTest(TestSuccessAtomFeed())
     suite.addTest(loader.loadTestsFromTestCase(TestShutdown))
 
     res = unittest.TextTestRunner(verbosity=2).run(suite)
