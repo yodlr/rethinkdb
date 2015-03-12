@@ -15,7 +15,7 @@ except ImportError:
 
 from . import ql2_pb2 as p
 
-__all__ = ['connect', 'setLoopType', 'aconnect', 'Connection', 'Cursor']
+__all__ = ['connect', 'set_loop_type', 'aconnect', 'Connection', 'Cursor']
 
 pResponse = p.Response.ResponseType
 pQuery = p.Query.QueryType
