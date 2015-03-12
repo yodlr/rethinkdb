@@ -224,6 +224,7 @@ class SocketWrapper(object):
                 pass
             finally:
                 self._socket = None
+                self._stream = None
 
     @gen.coroutine
     def recvall(self, length):
