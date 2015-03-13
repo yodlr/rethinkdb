@@ -95,9 +95,6 @@ EM.run {
   $handlers = [DefaultHandler.new, ValTypeHandler.new, ValTypeHandler2.new,
                ChangeOnlyHandler.new, ChangeHandler.new, CleverChangeHandler.new]
 
-  $handlers = [DefaultHandler.new]
-  $runners = [method(:run3)]
-
   $runners.each {|runner|
     ($handlers + [$lambda]).each {|handler|
       runner.call(r.table('test').get(0), handler)
@@ -116,20 +113,25 @@ EM.run {
   EM.defer(proc{sleep 2}, proc{EM.stop})
 }
 
-def canonicalize x
+def sub_canon x
   case x
   when Array
-    x.map{|y| canonicalize(y)}.sort{|a,b| a.to_json <=> b.to_json}
+    x.map{|y| sub_canon(y)}.sort{|a,b| a.to_json <=> b.to_json}
   when Hash
-    canonicalize(x.to_a)
+    sub_canon(x.to_a)
   when RuntimeError
     "error"
   else
     x
   end
 end
-$res = ($handlers.map{|x| [x.class, canonicalize(x.state)]} +
-        [[:lambda, canonicalize($lambda_state)]])
+def canon x
+  x.map{|pair| [sub_canon(pair[0]), sub_canon(pair[1])]}.sort {|a,b|
+    a.to_json <=> b.to_json
+  }
+end
+$res = ($handlers.map{|x| [x.class, canon(x.state)]} +
+        [[Proc, canon($lambda_state)]])
 
 $expected = [[DefaultHandler,
               [[:err, "error"],
@@ -163,37 +165,40 @@ $expected = [[DefaultHandler,
                [:stream_val, [["new_val", [["id", 0]]]]],
                [:stream_val, [["new_val", [["id", 1]]], ["old_val", nil]]]]],
              [ChangeOnlyHandler,
-              [[:change, [["a", 1], ["id", 0]], [["id", 0]]],
-               [:change, [["a", 1], ["id", 0]], [["id", 0]]],
-               [:change, [["id", 1]], nil],
+              [[:change, [["id", 0]]],
+               [:change, [["id", 0]]],
+               [:change, nil],
                [:err, "error"]]],
              [ChangeHandler,
               [[:atom, [["id", 0]]],
                [:atom, [[["id", 0]]]],
-               [:change, [["a", 1], ["id", 0]], [["id", 0]]],
-               [:change, [["a", 1], ["id", 0]], [["id", 0]]],
-               [:change, [["id", 1]], nil],
+               [:change, [["id", 0]]],
+               [:change, [["id", 0]]],
+               [:change, nil],
                [:err, "error"],
                [:stream_val, [["id", 0]]],
                [:stream_val, [["new_val", [["id", 0]]]]]]],
              [CleverChangeHandler,
               [[:atom, [["id", 0]]],
                [:atom, [[["id", 0]]]],
-               [:change, [["a", 1], ["id", 0]], [["id", 0]]],
-               [:change, [["a", 1], ["id", 0]], [["id", 0]]],
-               [:change, [["id", 1]], nil],
+               [:change, [["id", 0]]],
+               [:change, [["id", 0]]],
+               [:change, nil],
                [:err, "error"],
                [:initial_val, [["id", 0]]],
+               [:state, "initializing"],
+               [:state, "ready"],
+               [:state, "ready"],
                [:stream_val, [["id", 0]]]]],
-             [:lambda,
+             [Proc,
               [["error", nil],
-               [[["id", 0]], nil],
-               [[["id", 0]], nil],
-               [[["id", 0]], nil],
-               [[["new_val", [["a", 1], ["id", 0]]], ["old_val", [["id", 0]]]], nil],
-               [[["new_val", [["a", 1], ["id", 0]]], ["old_val", [["id", 0]]]], nil],
-               [[["new_val", [["id", 0]]]], nil],
-               [[["new_val", [["id", 1]]], ["old_val", nil]], nil]]]]
+               [nil, [["id", 0]]],
+               [nil, [["id", 0]]],
+               [nil, [["id", 0]]],
+               [nil, [["new_val", [["a", 1], ["id", 0]]], ["old_val", [["id", 0]]]]],
+               [nil, [["new_val", [["a", 1], ["id", 0]]], ["old_val", [["id", 0]]]]],
+               [nil, [["new_val", [["id", 0]]]]],
+               [nil, [["new_val", [["id", 1]]], ["old_val", nil]]]]]]
 $expected = $expected.map{|arr| [arr[0], arr[1].flat_map{|x| [x]*$runners.size}]}
 
 if $res != $expected

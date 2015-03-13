@@ -51,7 +51,7 @@ module RethinkDB
     def on_error(err)
       raise err
     end
-    def on_val
+    def on_val(val)
     end
     def on_array(arr)
       arr.each{|x| on_stream_val(x)}
@@ -397,7 +397,8 @@ module RethinkDB
               elsif res['t'] == Response::ResponseType::SUCCESS_ATOM
                 EM.next_tick {
                   b.on_open_idempotent
-                  b.on_atom(Shim.response_to_native(res, msg, opts))
+                  val = Shim.response_to_native(res, msg, opts)
+                  val.is_a?(Array) ? b.on_array(val) : b.on_atom(val)
                   b.on_close_idempotent
                 }
               elsif res['t'] == Response::ResponseType::WAIT_COMPLETE
@@ -592,7 +593,6 @@ module RethinkDB
     end
 
     def remove_em_waiters
-      PP.pp [:remove_em_waiters]
       @listener_mutex.synchronize {
         @waiters.each {|k,v|
           @waiters.delete(k) if v.is_a?(Proc)
