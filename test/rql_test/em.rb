@@ -1,5 +1,9 @@
-load 'quickstart3.rb'
 require 'eventmachine'
+require_relative './importRethinkDB.rb'
+
+$port ||= (ARGV[0] || ENV['RDB_DRIVER_PORT'] || raise('driver port not supplied')).to_i
+ARGV.clear
+$c = r.connect(port: $port).repl
 
 class DefaultHandler < RethinkDB::Handler
   attr_accessor :state
