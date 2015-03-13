@@ -216,9 +216,8 @@ module RethinkDB
         (@run ? "" : "\n#{preview}") + ">"
     end
 
-    def initialize(results, msg, connection, opts, token, is_cfeed, more) # :nodoc:
+    def initialize(results, msg, connection, opts, token, more) # :nodoc:
       @more = more
-      @is_cfeed = is_cfeed
       @results = results
       @msg = msg
       @run = false
@@ -228,8 +227,6 @@ module RethinkDB
       @token = token
       fetch_batch
     end
-
-    def is_cfeed?; @is_cfeed; end
 
     def each(&block) # :nodoc:
       raise RqlRuntimeError, "Can only iterate over a cursor once." if @run
@@ -438,10 +435,10 @@ module RethinkDB
         return res if !res
         if res['t'] == Response::ResponseType::SUCCESS_PARTIAL
           value = Cursor.new(Shim.response_to_native(res, msg, opts),
-                             msg, self, opts, token, is_cfeed, true)
+                             msg, self, opts, token, true)
         elsif res['t'] == Response::ResponseType::SUCCESS_SEQUENCE
           value = Cursor.new(Shim.response_to_native(res, msg, opts),
-                             msg, self, opts, token, is_cfeed, false)
+                             msg, self, opts, token, false)
         else
           value = Shim.response_to_native(res, msg, opts)
         end
