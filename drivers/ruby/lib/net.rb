@@ -140,7 +140,7 @@ module RethinkDB
         when RethinkDB::Connection
           conn = arg
         when Hash
-          args = arg
+          opts = arg
         when Proc
           block = arg
         when Handler
