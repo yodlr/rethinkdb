@@ -84,7 +84,6 @@ def brun4(x, handler)
 end
 $runners = [method(:run1), method(:run2), method(:run3), method(:run4),
             method(:brun1), method(:brun2), method(:brun3), method(:brun4)]
-$runners = [method(:run3)]
 
 r.table_create('test').run rescue nil
 r.table('test').delete.run
@@ -95,6 +94,10 @@ EM.run {
   $lambda = lambda {|err, row| $lambda_state << [err, row]}
   $handlers = [DefaultHandler.new, ValTypeHandler.new, ValTypeHandler2.new,
                ChangeOnlyHandler.new, ChangeHandler.new, CleverChangeHandler.new]
+
+  $handlers = [DefaultHandler.new]
+  $runners = [method(:run3)]
+
   $runners.each {|runner|
     ($handlers + [$lambda]).each {|handler|
       runner.call(r.table('test').get(0), handler)

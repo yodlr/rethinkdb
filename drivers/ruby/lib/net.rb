@@ -9,9 +9,36 @@ module RethinkDB
     end
   end
 
-  class Handler < Proc
+  class EM_Guard
+    @@mutex = Mutex.new
+    @@registered = false
+    @@conns = []
+    def self.register(conn)
+      @@mutex.synchronize {
+        if !@@registered
+          @@registered = true
+          EM.add_shutdown_hook{EM_Guard.unregister}
+        end
+        @@conns |= [conn]
+      }
+    end
+    def self.unregister
+      old_conns = []
+      @@mutex.synchronize {
+        @@registered = false
+        @@conns, old_conns = old_conns, @@conns
+      }
+      # This function acquires `@@listener_mutex` on the connections,
+      # so it's safer to do this outside our own synchronization.
+      old_conns.each {|conn|
+        conn.remove_em_waiters
+      }
+    end
+  end
+
+  class Handler
     def initialize
-      super{raise RqlRuntimeError, "Handlers should not be called directly."}
+      @stopped = @opened = @closed = false
     end
 
     def on_open
@@ -19,18 +46,6 @@ module RethinkDB
     def on_close
     end
     def on_wait_complete
-    end
-    def on_open_idempotent
-      if !@opened
-        @opened = true
-        on_open
-      end
-    end
-    def on_close_idempotent
-      if !@closed
-        @closed = true
-        on_close
-      end
     end
 
     def on_error(err)
@@ -62,6 +77,26 @@ module RethinkDB
     end
     def on_unrecognized_change(val)
       on_stream_val(val)
+    end
+
+    def on_open_idempotent
+      if !@opened
+        @opened = true
+        on_open
+      end
+    end
+    def on_close_idempotent
+      if !@closed
+        @closed = true
+        on_close
+      end
+    end
+
+    def stop
+      @stopped = true
+    end
+    def stopped?
+      @stopped
     end
   end
 
@@ -95,10 +130,25 @@ module RethinkDB
   class RQL
     @@default_conn = nil
     def self.set_default_conn c; @@default_conn = c; end
-    def run(c=@@default_conn, opts=nil, &b)
-      unbound_if(@body == RQL)
-      c, opts = @@default_conn, c if !opts && !c.kind_of?(RethinkDB::Connection)
-      opts = {} if !opts
+    def parse(*args, &b)
+      conn = @@default_conn
+      opts = {}
+      block = b
+      args = args.map{|x| x.is_a?(Class) ? x.new : x}
+      args.each {|arg|
+        case arg
+        when RethinkDB::Connection
+          conn = arg
+        when Hash
+          args = arg
+        when Proc
+          block = arg
+        when Handler
+          block = arg
+        else
+          raise ArgumentError, "Unexpected argument #{arg.inspect}."
+        end
+      }
       if (tf = opts[:time_format])
         opts[:time_format] = (tf = tf.to_s)
         if tf != 'raw' && tf != 'native'
@@ -117,43 +167,34 @@ module RethinkDB
           raise ArgumentError, "`binary_format` must be 'raw' or 'native' (got `#{bf}`)."
         end
       end
-      if !c
+      if !conn
         raise ArgumentError, "No connection specified!\n" \
         "Use `query.run(conn)` or `conn.repl(); query.run`."
       end
-      c.run(@body, opts, &b)
+      {conn: conn, opts: opts, block: block}
     end
-    def em_run(*a, &b)
-      if b
-        args = a
-        handler = b.is_a?(Handler) ? b : CallbackHandler.new(b)
-      else
-        args = a[0...-1]
-        h = a[-1]
-        h = h.new if h.is_a? Class
-        if h.is_a? Handler
-          handler = h
-        elsif h.is_a? Proc
-          handler = CallbackHandler.new(h)
-        else
-          raise ArgumentError, "Argument error: `em_run` requires a block, a Proc " +
-            "as its last argument, the name a subclass of `RethinkDB::Handler` " +
-            "as its last argument, or an instance of a subclass of " +
-            "`RethinkDB::Handler` as its last argument " +
-            "(got #{h} of class #{h.class} instead)."
-        end
+    def run(*args, &b)
+      unbound_if(@body == RQL)
+      args = parse(*args, &b)
+      args[:conn].run(@body, args[:opts], args[:block])
+    end
+    def em_run(*args, &b)
+      unbound_if(@body == RQL)
+      args = parse(*args, &b)
+      if args[:block].is_a?(Proc)
+        args[:block] = CallbackHandler.new(args[:block])
+      end
+      if !args[:block].is_a?(Handler)
+        raise ArgumentError, "No handler specified."
       end
 
       # If the user has overridden the `on_state` method, we assume they want states.
-      if handler.method(:on_state).owner != Handler
-        if args[-1].is_a?(Hash)
-          args[-1] = args[-1].merge(include_states: true)
-        else
-          args << {include_states: true}
-        end
+      if args[:block].method(:on_state).owner != Handler
+        args[:opts] = args[:opts].merge(include_states: true)
       end
 
-      run(*args, &handler)
+      EM_Guard.register(args[:conn])
+      args[:conn].run(@body, args[:opts], args[:block])
     end
   end
 
@@ -285,20 +326,20 @@ module RethinkDB
     def register_query(token, opts, &b)
       if !opts[:noreply]
         @listener_mutex.synchronize{
-          raise RqlDriverError, "Internal driver error, token already in use." \
-            if @waiters.has_key?(token)
+          if @waiters.has_key?(token)
+            raise RqlDriverError, "Internal driver error, token already in use."
+          end
           @waiters[token] = b ? b : ConditionVariable.new
           @opts[token] = opts
         }
       end
     end
     def run_internal(q, opts, token)
-        register_query(token, opts)
-        dispatch(q, token)
-        opts[:noreply] ? nil : wait(token, nil)
-      end
+      register_query(token, opts)
+      dispatch(q, token)
+      opts[:noreply] ? nil : wait(token, nil)
     end
-    def run(msg, opts, &b)
+    def run(msg, opts, b)
       reconnect(:noreply_wait => false) if @auto_reconnect && !is_open()
       raise RqlRuntimeError, "Connection is closed." if !is_open()
 
@@ -315,72 +356,81 @@ module RethinkDB
                   [k.to_s, (v.is_a?(RQL) ? v.to_pb : RQL.new.expr(v).to_pb)]
                 }]]
 
-      if b.is_a? EMProc
-        lambda = {|res|
-          if res
-            is_cfeed = (res['n'] & [Response::ResponseNote::SEQUENCE_FEED,
-                                    Response::ResponseNote::ATOM_FEED,
-                                    Response::ResponseNote::ORDER_BY_LIMIT_FEED,
-                                    Response::ResponseNote::UNIONED_FEED]) != []
-            if (res['t'] == Response::ResponseType::SUCCESS_PARTIAL) ||
-               (res['t'] == Response::ResponseType::SUCCESS_SEQUENCE)
-              EM.next_tick {
-                b.on_open_idempotent
-                Shim.response_to_native(res, msg, opts).each {|row|
+      if b.is_a? Handler
+        callback = lambda {|res|
+          begin
+            return if b.stopped? || !EM.reactor_running?
+            if res
+              is_cfeed = (res['n'] & [Response::ResponseNote::SEQUENCE_FEED,
+                                      Response::ResponseNote::ATOM_FEED,
+                                      Response::ResponseNote::ORDER_BY_LIMIT_FEED,
+                                      Response::ResponseNote::UNIONED_FEED]) != []
+              if (res['t'] == Response::ResponseType::SUCCESS_PARTIAL) ||
+                  (res['t'] == Response::ResponseType::SUCCESS_SEQUENCE)
+                EM.next_tick {
+                  b.on_open_idempotent
                   if res['t'] == Response::ResponseType::SUCCESS_PARTIAL
-                    register_query(token, all_opts, &lambda)
-                    dispatch([Query::QueryType::CONTINUE], @token)
+                    register_query(token, all_opts, &callback)
+                    dispatch([Query::QueryType::CONTINUE], token)
                   end
-                  if is_cfeed
-                    if row.has_key?('new_val') && row.has_key?('old_val')
-                      b.on_change(row['old_val'], row['new_val'])
-                    elsif row.has_key?('new_val') && !row.has_key?('old_val')
-                      b.on_initial_val(row['new_val'])
-                    elsif row.has_key?('error')
-                      b.on_change_error(row['error'])
-                    elsif row.has_key?('state')
-                      b.on_state(row['state'])
+                  Shim.response_to_native(res, msg, opts).each {|row|
+                    if is_cfeed
+                      if row.has_key?('new_val') && row.has_key?('old_val')
+                        b.on_change(row['old_val'], row['new_val'])
+                      elsif row.has_key?('new_val') && !row.has_key?('old_val')
+                        b.on_initial_val(row['new_val'])
+                      elsif row.has_key?('error')
+                        b.on_change_error(row['error'])
+                      elsif row.has_key?('state')
+                        b.on_state(row['state'])
+                      else
+                        b.on_unrecognized_change(row)
+                      end
                     else
-                      b.on_unrecognized_change(row)
+                      b.on_stream_val(row)
                     end
-                  else
-                    b.on_stream_val(row)
-                  end
+                  }
                   if res['t'] == Response::ResponseType::SUCCESS_SEQUENCE
                     b.on_close_idempotent
                   end
                 }
-              }
-            elsif res['t'] == Response::ResponseType::SUCCESS_ATOM
-              EM.next_tick {
-                b.on_open_idempotent
-                b.on_atom(Shim.response_to_native(res, msg, opts))
-                b.on_close_idempotent
-              }
-            elsif res['t'] == Response::ResponseType::WAIT_COMPLETE
-              EM.next_tick {
-                b.on_open_idempotent
-                b.on_wait_complete
-                b.on_close_idempotent
-              }
-            else
-              exc = nil
-              begin
-                exc = Shim.response_to_native(res, msg, opts)
-              rescue Exception => e
-                exc = e
+              elsif res['t'] == Response::ResponseType::SUCCESS_ATOM
+                EM.next_tick {
+                  b.on_open_idempotent
+                  b.on_atom(Shim.response_to_native(res, msg, opts))
+                  b.on_close_idempotent
+                }
+              elsif res['t'] == Response::ResponseType::WAIT_COMPLETE
+                EM.next_tick {
+                  b.on_open_idempotent
+                  b.on_wait_complete
+                  b.on_close_idempotent
+                }
+              else
+                exc = nil
+                begin
+                  exc = Shim.response_to_native(res, msg, opts)
+                rescue Exception => e
+                  exc = e
+                end
+                EM.next_tick {
+                  b.on_open_idempotent
+                  b.on_error(e)
+                  b.on_close_idempotent
+                }
               end
-              EM.next_tick {
-                b.on_open_idempotent
-                b.on_error(e)
-                b.on_close_idempotent
-              }
+            else
+              EM.next_tick { b.on_close_idempotent }
             end
-          else
-            EM.next_tick { b.on_close_idempotent }
+          rescue Exception => e
+            EM.next_tick {
+              b.on_open_idempotent
+              b.on_error(e)
+              b.on_close_idempotent
+            }
           end
         }
-        register_query(token, all_opts, &lambda)
+        register_query(token, all_opts, &callback)
         dispatch(q, token)
       else
         res = run_internal(q, all_opts, token)
@@ -541,6 +591,15 @@ module RethinkDB
       raise RqlRuntimeError, "No last connection.  Use RethinkDB::Connection.new."
     end
 
+    def remove_em_waiters
+      PP.pp [:remove_em_waiters]
+      @listener_mutex.synchronize {
+        @waiters.each {|k,v|
+          @waiters.delete(k) if v.is_a?(Proc)
+        }
+      }
+    end
+
     def note_data(token, data) # Synchronize around this!
       raise RqlDriverError, "Unknown token in response." if !@waiters.has_key?(token)
       @opts.delete(token)
@@ -551,7 +610,9 @@ module RethinkDB
         w.signal
       when Proc
         w.call(data)
+        @waiters.delete(token)
       when nil
+        # nothing
       else
         raise RqlDriverError, "Unrecognized value #{w.inspect} in @waters."
       end
@@ -592,8 +653,9 @@ module RethinkDB
         raise RqlRuntimeError, "Server dropped connection with message: \"#{response}\""
       end
 
-      raise RqlDriverError, "Internal driver error, listener already started." \
-        if @listener
+      if @listener
+        raise RqlDriverError, "Internal driver error, listener already started."
+      end
       @listener = Thread.new {
         while true
           begin
