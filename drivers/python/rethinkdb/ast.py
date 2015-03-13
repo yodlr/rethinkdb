@@ -95,12 +95,11 @@ class RqlQuery(object):
 
     # Send this query to the server to be executed
     def run(self, c=None, **global_optargs):
-        if not c:
-            if Repl.get():
-                c = Repl.get()
-            else:
+        if c is None:
+            c = Repl.get()
+            if c is None:
                 if Repl.replActive:
-                    raise RqlDriverError("RqlQuery.run must be given a connection to run on, which is not set on this thread.")
+                    raise RqlDriverError("RqlQuery.run must be given a connection to run on. A default connection has been set with `repl()` on another thread, but not this one.")
                 else:
                     raise RqlDriverError("RqlQuery.run must be given a connection to run on.")
 
