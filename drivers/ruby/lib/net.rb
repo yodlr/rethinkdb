@@ -89,7 +89,6 @@ module RethinkDB
       if !@closed
         @closed = true
         on_close
-        stop
       end
     end
 
