@@ -76,7 +76,14 @@ module RethinkDB
       on_stream_val({'old_val' => old_val, 'new_val' => new_val})
     end
     def on_unrecognized_change(val)
-      on_stream_val(val)
+      if (method(:on_stream_val).owner != Handler ||
+          method(:on_val).owner != Handler)
+        on_stream_val(val)
+      else
+        msg = "Unrecognized changefeed document #{val.inspect}.  " +
+          "Is your driver out of date?"
+        on_error(RqlDriverError.new(msg))
+      end
     end
 
     def on_open_idempotent
