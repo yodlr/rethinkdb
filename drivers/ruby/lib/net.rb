@@ -624,7 +624,7 @@ module RethinkDB
       when nil
         # nothing
       else
-        raise RqlDriverError, "Unrecognized value #{w.inspect} in @waters."
+        raise RqlDriverError, "Unrecognized value #{w.inspect} in `@waiters`."
       end
     end
 
