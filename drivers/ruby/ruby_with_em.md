@@ -365,7 +365,7 @@ Streams are stopped when they are exhausted or when EventMachine
 stops.  If you're using a `Handler`, you can also stop all streams
 using that handler by calling `Handler::stop`.
 
-#### Example 1: srinting the first 5 changes
+#### Example 1: printing the first 5 changes
 
 ```rb
 class Printer < RethinkDB::Handler
