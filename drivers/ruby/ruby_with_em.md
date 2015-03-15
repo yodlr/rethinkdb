@@ -358,3 +358,65 @@ The changefeed will receive an error and be closed:
 [:err, "Changefeed aborted (table unavailable).\nBacktrace:\nr.table(\"test\").changes\n^^^^^^^^^^^^^^^^^^^^^^^"]
 :closed
 ```
+
+## Stopping a stream
+
+Streams are stopped when they are exhausted or when EventMachine
+stops.  If you're using a `Handler`, you can also stop all streams
+using that handler by calling `Handler::stop`.
+
+#### Example 1: srinting the first 5 changes
+
+```rb
+class Printer < RethinkDB::Handler
+  def initialize(max)
+    @counter = max
+    stop if @counter <= 0
+  end
+  def on_open
+    # Once the changefeed is open, insert 10 rows.
+    r.table('test').insert([{}]*10).run($conn, noreply: true)
+  end
+  def on_val(val)
+    # Every time we print a change, decrement `@counter` and stop if we hit 0.
+    p val
+    @counter -= 1
+    stop if @counter <= 0
+  end
+end
+
+EM.run {
+  r.table('test').changes.em_run($conn, Printer.new(5))
+}
+```
+
+Will print this:
+
+```
+{"old_val"=>nil, "new_val"=>{"id"=>"07cb420f-905b-4cbf-bd82-b4885babe1e1"}}
+{"old_val"=>nil, "new_val"=>{"id"=>"4517ba6d-5511-405d-8991-682ca0a375fd"}}
+{"old_val"=>nil, "new_val"=>{"id"=>"c5f1074e-7a72-403c-bfe9-9d7d7de4a2e9"}}
+{"old_val"=>nil, "new_val"=>{"id"=>"f41daf81-fa00-40be-97e8-bba02fedd9ae"}}
+{"old_val"=>nil, "new_val"=>{"id"=>"1975449c-9cd7-4a3b-b027-1b9bdabf1299"}}
+```
+
+#### Example 2: stopping a changefeed based on another changefeed
+
+```rb
+class Printer < RethinkDB::Handler
+  def on_val(val)
+    p val
+  end
+end
+
+EM.run {
+  printer = Printer.new
+  r.table('test').changes.em_run($conn, Printer)
+  r.table('commands').changes['new_val']['stop'].em_run($conn) {|should_stop|
+    printer.stop if should_stop
+  }
+}
+```
+
+Will print changes to the table `test` until you run
+`r.table('commands').insert({stop: true})`.

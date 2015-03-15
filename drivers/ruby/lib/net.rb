@@ -54,7 +54,9 @@ module RethinkDB
     def on_val(val)
     end
     def on_array(arr)
-      arr.each{|x| on_stream_val(x)}
+      arr.each{|x|
+        on_stream_val(x) if !stopped?
+      }
     end
     def on_atom(val)
       on_val(val)
@@ -372,7 +374,7 @@ module RethinkDB
               if (res['t'] == Response::ResponseType::SUCCESS_PARTIAL) ||
                   (res['t'] == Response::ResponseType::SUCCESS_SEQUENCE)
                 EM.next_tick {
-                  b.on_open_idempotent
+                  b.on_open_idempotent if !b.stopped?
                   if res['t'] == Response::ResponseType::SUCCESS_PARTIAL
                     register_query(token, all_opts, &callback)
                     dispatch([Query::QueryType::CONTINUE], token)
@@ -380,36 +382,38 @@ module RethinkDB
                   Shim.response_to_native(res, msg, opts).each {|row|
                     if is_cfeed
                       if row.has_key?('new_val') && row.has_key?('old_val')
-                        b.on_change(row['old_val'], row['new_val'])
+                        b.on_change(row['old_val'], row['new_val']) if !b.stopped?
                       elsif row.has_key?('new_val') && !row.has_key?('old_val')
-                        b.on_initial_val(row['new_val'])
+                        b.on_initial_val(row['new_val']) if !b.stopped?
                       elsif row.has_key?('error')
-                        b.on_change_error(row['error'])
+                        b.on_change_error(row['error']) if !b.stopped?
                       elsif row.has_key?('state')
-                        b.on_state(row['state'])
+                        b.on_state(row['state']) if !b.stopped?
                       else
-                        b.on_unrecognized_change(row)
+                        b.on_unrecognized_change(row) if !b.stopped?
                       end
                     else
-                      b.on_stream_val(row)
+                      b.on_stream_val(row) if !b.stopped?
                     end
                   }
                   if res['t'] == Response::ResponseType::SUCCESS_SEQUENCE
-                    b.on_close_idempotent
+                    b.on_close_idempotent if !b.stopped?
                   end
                 }
               elsif res['t'] == Response::ResponseType::SUCCESS_ATOM
                 EM.next_tick {
-                  b.on_open_idempotent
+                  b.on_open_idempotent if !b.stopped?
                   val = Shim.response_to_native(res, msg, opts)
-                  val.is_a?(Array) ? b.on_array(val) : b.on_atom(val)
-                  b.on_close_idempotent
+                  if !b.stopped?
+                    val.is_a?(Array) ? b.on_array(val) : b.on_atom(val)
+                  end
+                  b.on_close_idempotent if !b.stopped?
                 }
               elsif res['t'] == Response::ResponseType::WAIT_COMPLETE
                 EM.next_tick {
-                  b.on_open_idempotent
-                  b.on_wait_complete
-                  b.on_close_idempotent
+                  b.on_open_idempotent if !b.stopped?
+                  b.on_wait_complete if !b.stopped?
+                  b.on_close_idempotent if !b.stopped?
                 }
               else
                 exc = nil
@@ -419,19 +423,21 @@ module RethinkDB
                   exc = e
                 end
                 EM.next_tick {
-                  b.on_open_idempotent
-                  b.on_error(e)
-                  b.on_close_idempotent
+                  b.on_open_idempotent if !b.stopped?
+                  b.on_error(e) if !b.stopped?
+                  b.on_close_idempotent if !b.stopped?
                 }
               end
             else
-              EM.next_tick { b.on_close_idempotent }
+              EM.next_tick {
+                b.on_close_idempotent if !b.stopped?
+              }
             end
           rescue Exception => e
             EM.next_tick {
-              b.on_open_idempotent
-              b.on_error(e)
-              b.on_close_idempotent
+              b.on_open_idempotent if !b.stopped?
+              b.on_error(e) if !b.stopped?
+              b.on_close_idempotent if !b.stopped?
             }
           end
         }
