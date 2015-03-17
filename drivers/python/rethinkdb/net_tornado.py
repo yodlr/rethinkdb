@@ -10,7 +10,7 @@ from tornado import gen, iostream
 from tornado.ioloop import IOLoop
 
 from . import ql2_pb2 as p
-from .net import decodeUFTPipe
+from .net import decodeUTFPipe
 from . import repl              # For the repl connection
 from .errors import *
 from .ast import RqlQuery, RqlTopLevelQuery, DB
@@ -204,7 +204,7 @@ class SocketWrapper(object):
             yield self.aclose()
             raise RqlDriverError(("Server dropped connection " +
                                   "with message: \"%s\"") %
-                                 decodeUFTPipe(response).strip())
+                                 decodeUTFPipe(response).strip())
 
     @gen.coroutine
     def aclose(self):
@@ -428,9 +428,9 @@ class Connection(object):
                                                       self._socket.recvall(12))
                 (response_token, response_len,) \
                     = struct.unpack("<qL", self._header_in_progress)
+                future = self._socket.recvall(response_len)
                 response_buf \
-                    = yield with_relative_timeout(timeout,
-                                                  self._socket.recvall(response_len))
+                    = yield with_relative_timeout(timeout, future)
                 self._header_in_progress = None
             except KeyboardInterrupt as err:
                 # When interrupted while waiting for a response,

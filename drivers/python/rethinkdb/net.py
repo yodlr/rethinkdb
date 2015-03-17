@@ -37,7 +37,7 @@ except AttributeError:
     dict_items = lambda d: d.items()
 
 
-def decodeUFTPipe(inputPipe):
+def decodeUTFPipe(inputPipe):
     # attempt to decode input as utf-8 with fallbacks to get something useful
     try:
         return inputPipe.decode('utf-8', errors='ignore')
@@ -218,7 +218,7 @@ class SocketWrapper(object):
             self.close()
             raise RqlDriverError(("Server dropped connection " +
                                   "with message: \"%s\"") %
-                                 decodeUFTPipe(response).strip())
+                                 decodeUTFPipe(response).strip())
 
     def close(self):
         if self._socket is not None:
