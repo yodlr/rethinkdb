@@ -166,7 +166,6 @@ class SocketWrapper(object):
         self.auth_key = auth_key.encode('ascii')
         self._socket = None
         self._stream = None
-        self._read_buffer = None
 
     def is_open(self):
         return self._stream is not None
