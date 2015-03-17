@@ -8,7 +8,7 @@ import struct
 try:
     from importlib import import_module
 except ImportError:
-    def import_module(name):
+    def import_module(name, package=None):
         # song & dance needed to do relative import in 2.6, which
         # doesn't have importlib
         return __import__(name[1:], globals(), locals(), [], 1)
@@ -511,7 +511,7 @@ connectFunc = None
 
 def set_loop_type(library):
     global connectFunc
-    mod = import_module('.net_%s' % library)
+    mod = import_module('.net_%s' % library, package=__package__)
     connectFunc = mod.aconnect
 
 
