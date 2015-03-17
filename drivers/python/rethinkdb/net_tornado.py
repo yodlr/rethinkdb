@@ -218,69 +218,35 @@ class SocketWrapper(object):
                 self._stream = None
 
     @gen.coroutine
+    def communicate(self, coroutine):
+        try:
+            res = yield coroutine
+        except IOError as err:
+            if err.errno == errno.ECONNRESET:
+                yield self.aclose()
+                raise RqlDriverError("Connection is closed.")
+            elif err.errno != errno.EINTR:
+                yield self.aclose()
+                raise RqlDriverError(('Connection interrupted ' +
+                                      'receiving from %s:%s - %s') %
+                                     (self.host, self.port, str(err)))
+        except Exception as err:
+            yield self.aclose()
+            raise RqlDriverError('Error receiving from %s:%s - %s' %
+                                 (self.host, self.port, str(err)))
+        except:
+            yield self.aclose()
+            raise
+        raise gen.Return(res)
+
     def recvto(self, delimiter):
-        try:
-            res = yield self._stream.read_until(delimiter)
-        except IOError as err:
-            if err.errno == errno.ECONNRESET:
-                yield self.aclose()
-                raise RqlDriverError("Connection is closed.")
-            elif err.errno != errno.EINTR:
-                yield self.aclose()
-                raise RqlDriverError(('Connection interrupted ' +
-                                      'receiving from %s:%s - %s') %
-                                     (self.host, self.port, str(err)))
-        except Exception as err:
-            yield self.aclose()
-            raise RqlDriverError('Error receiving from %s:%s - %s' %
-                                 (self.host, self.port, str(err)))
-        except:
-            yield self.aclose()
-            raise
-        raise gen.Return(res)
+        return self.communicate(self._stream.read_until(delimiter))
 
-    @gen.coroutine
     def recvall(self, length):
-        try:
-            res = yield self._stream.read_bytes(length)
-        except IOError as err:
-            if err.errno == errno.ECONNRESET:
-                yield self.aclose()
-                raise RqlDriverError("Connection is closed.")
-            elif err.errno != errno.EINTR:
-                yield self.aclose()
-                raise RqlDriverError(('Connection interrupted ' +
-                                      'receiving from %s:%s - %s') %
-                                     (self.host, self.port, str(err)))
-        except Exception as err:
-            yield self.aclose()
-            raise RqlDriverError('Error receiving from %s:%s - %s' %
-                                 (self.host, self.port, str(err)))
-        except:
-            yield self.aclose()
-            raise
-        raise gen.Return(res)
+        return self.communicate(self._stream.read_bytes(length))
 
-    @gen.coroutine
     def sendall(self, data):
-        try:
-            yield self._stream.write(data)
-        except IOError as err:
-            if err.errno == errno.ECONNRESET:
-                yield self.aclose()
-                raise RqlDriverError("Connection is closed.")
-            elif err.errno != errno.EINTR:
-                yield self.aclose()
-                raise RqlDriverError(('Connection interrupted ' +
-                                      'sending to %s:%s - %s') %
-                                     (self.host, self.port, str(err)))
-        except Exception as err:
-            yield self.aclose()
-            raise RqlDriverError('Error sending to %s:%s - %s' %
-                                 (self.host, self.port, str(err)))
-        except:
-            yield self.aclose()
-            raise
+        return self.communicate(self._stream.write(data))
 
 
 class Connection(object):
