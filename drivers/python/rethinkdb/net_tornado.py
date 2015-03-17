@@ -225,7 +225,7 @@ class SocketWrapper(object):
             if err.errno == errno.ECONNRESET:
                 yield self.aclose()
                 raise RqlDriverError("Connection is closed.")
-            elif err.errno != errno.EINTR:
+            else:
                 yield self.aclose()
                 raise RqlDriverError(('Connection interrupted ' +
                                       'receiving from %s:%s - %s') %
