@@ -42,10 +42,10 @@ module RethinkDB
     end
     def handle(m, args, caller)
       if !stopped?
-        if method(m).arity == args.size
-          send(m, *args)
-        elsif method(m).arity == args.size + 1 || method(m).arity == -1
+        if method(m).arity == args.size + 1 || method(m).arity == -1
           send(m, *args, caller)
+        else
+          send(m, *args)
         end
       end
     end
