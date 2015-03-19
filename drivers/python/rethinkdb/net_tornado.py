@@ -44,18 +44,31 @@ class TornadoCursor(Cursor):
         self.new_response.set_result(True)
         self.new_response = Future()
 
-    @gen.coroutine
     def _get_next(self, timeout):
+        result_future = Future()
         deadline = None if timeout is None else self.conn._io_loop.time() + timeout
+
         self._maybe_fetch_batch()
-        while len(self.items) == 0:
-            if self.error == False:
-                raise RqlCursorEmpty()
-            if self.error is not None:
-                raise self.error
-            yield with_absolute_timeout(deadline, self.new_response,
-                                        self.conn._io_loop)
-        raise gen.Return(convert_pseudo(self.items.pop(0), self.query))
+        self._try_next(result_future, deadline)
+        return result_future
+
+    def _try_next(self, result_future, deadline):
+        if result_future.running():
+            if len(self.items) == 0:
+                if self.error == False:
+                    result_future.set_exception(StopIteration())
+                elif self.error is not None:
+                    result_future.set_exception(self.error)
+                elif deadline is not None and deadline < self.conn._io_loop.time():
+                    result_future.set_exception(RqlTimeoutError())
+                else:
+                    self.conn._io_loop.add_future(self.new_response,
+                        lambda future: self._try_next(result_future, None))
+                    if deadline is not None:
+                        self.conn._io_loop.add_timeout(deadline,
+                            TornadoCursor._try_next, self, result_future, deadline)
+            else:
+                result_future.set_result(convert_pseudo(self.items.pop(0), self.query))
 
 
 class ConnectionInstance(object):

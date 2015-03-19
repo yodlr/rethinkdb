@@ -577,7 +577,7 @@ class TestGetIntersectingBatching(TestWithConnection):
                 row = yield next(itr)
                 self.assertEqual(reference.count(row), 1)
                 reference.remove(row)
-            yield self.asyncAssertRaises(r.RqlCursorEmpty, next(itr))
+            yield self.asyncAssertRaises(StopIteration, next(itr))
             self.assertTrue(cursor.error == False)
 
         self.assertTrue(seen_lazy)
@@ -613,7 +613,7 @@ class TestBatching(TestWithConnection):
             ids.remove(row['id'])
 
         self.assertEqual((yield next(itr))['id'], ids.pop())
-        yield self.asyncAssertRaises(r.RqlCursorEmpty, next(itr))
+        yield self.asyncAssertRaises(StopIteration, next(itr))
         self.assertTrue(cursor.error == False)
         yield r.db('test').table_drop('t1').run(c)
 
