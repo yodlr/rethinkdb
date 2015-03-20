@@ -200,9 +200,10 @@ Will print this:
 Sometimes you want to treat atoms differently from sequences, or to
 distinguish streams from arrays.  You can do that by defining
 `on_array`, `on_atom`, and `on_stream_val`.  (If `on_array` isn't
-defined, arrays will be treated the same as streams and
-`on_stream_val` or `on_val` will be called for every element of the
-array.)
+defined but `on_atom` is, then arrays will be passed to `on_atom`.  If
+neither `on_array` nor `on_atom` is defined, each element of the array
+will be passed to `on_stream_val` (or `on_val` if `on_stream_val`
+isn't defined).
 
 ```rb
 class Printer < RethinkDB::Handler

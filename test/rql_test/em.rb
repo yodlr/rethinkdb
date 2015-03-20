@@ -1,3 +1,4 @@
+require 'pp'
 require 'eventmachine'
 require_relative './importRethinkDB.rb'
 
@@ -31,8 +32,8 @@ class ValTypeHandler < RethinkDB::Handler
 end
 
 class ValTypeHandler2 < ValTypeHandler
-  def on_array(val)
-    on_atom(val)
+  def on_array(arr)
+    arr.each{|x| on_stream_val(x)}
   end
 end
 
@@ -88,6 +89,7 @@ def brun4(x, handler)
 end
 $runners = [method(:run1), method(:run2), method(:run3), method(:run4),
             method(:brun1), method(:brun2), method(:brun3), method(:brun4)]
+$runners = [$runners[0]]
 
 r.table_create('test').run rescue nil
 r.table('test').delete.run
@@ -148,8 +150,8 @@ $expected = [[DefaultHandler,
                [:val, [["new_val", [["id", 1]]], ["old_val", nil]]]]],
              [ValTypeHandler,
               [[:atom, [["id", 0]]],
+               [:atom, [[["id", 0]]]],
                [:err, "error"],
-               [:stream_val, [["id", 0]]],
                [:stream_val, [["id", 0]]],
                [:stream_val,
                 [["new_val", [["a", 1], ["id", 0]]], ["old_val", [["id", 0]]]]],
@@ -159,8 +161,8 @@ $expected = [[DefaultHandler,
                [:stream_val, [["new_val", [["id", 1]]], ["old_val", nil]]]]],
              [ValTypeHandler2,
               [[:atom, [["id", 0]]],
-               [:atom, [[["id", 0]]]],
                [:err, "error"],
+               [:stream_val, [["id", 0]]],
                [:stream_val, [["id", 0]]],
                [:stream_val,
                 [["new_val", [["a", 1], ["id", 0]]], ["old_val", [["id", 0]]]]],
@@ -175,16 +177,15 @@ $expected = [[DefaultHandler,
                [:err, "error"]]],
              [ChangeHandler,
               [[:atom, [["id", 0]]],
-               [:atom, [[["id", 0]]]],
                [:change, [["id", 0]]],
                [:change, [["id", 0]]],
                [:change, nil],
                [:err, "error"],
                [:stream_val, [["id", 0]]],
+               [:stream_val, [["id", 0]]],
                [:stream_val, [["new_val", [["id", 0]]]]]]],
              [CleverChangeHandler,
               [[:atom, [["id", 0]]],
-               [:atom, [[["id", 0]]]],
                [:change, [["id", 0]]],
                [:change, [["id", 0]]],
                [:change, nil],
@@ -193,6 +194,7 @@ $expected = [[DefaultHandler,
                [:state, "initializing"],
                [:state, "ready"],
                [:state, "ready"],
+               [:stream_val, [["id", 0]]],
                [:stream_val, [["id", 0]]]]],
              [Proc,
               [["error", nil],
@@ -206,5 +208,5 @@ $expected = [[DefaultHandler,
 $expected = $expected.map{|arr| [arr[0], arr[1].flat_map{|x| [x]*$runners.size}]}
 
 if $res != $expected
-  raise RuntimeError, "Unexpected output:\n" + $res.inspect
+  raise RuntimeError, "Unexpected output:\n" + PP.pp($res, "")
 end

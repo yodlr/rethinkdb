@@ -71,10 +71,14 @@ module RethinkDB
     def on_val(val, caller)
     end
     def on_array(arr, caller)
-      arr.each {|x|
-        break if stopped?
-        handle(:on_stream_val, [x], caller)
-      }
+      if method(:on_atom).owner != Handler
+        handle(:on_atom, [arr], caller)
+      else
+        arr.each {|x|
+          break if stopped?
+          handle(:on_stream_val, [x], caller)
+        }
+      end
     end
     def on_atom(val, caller)
       handle(:on_val, [val], caller)
