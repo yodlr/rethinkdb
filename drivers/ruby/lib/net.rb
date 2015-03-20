@@ -566,7 +566,6 @@ module RethinkDB
             res = @data.delete(token)
             raise Timeout::Error, "Timed out waiting for cursor response." if res.nil?
           end
-          @waiters.delete(token)
         }
         raise RqlRuntimeError, "Connection is closed." if res.nil? && !is_open()
         raise RqlDriverError, "Internal driver error, no response found." if res.nil?
@@ -701,14 +700,13 @@ module RethinkDB
 
     def note_data(token, data) # Synchronize around this!
       @opts.delete(token)
-      w = @waiters[token]
+      w = @waiters.delete(token)
       case w
       when ConditionVariable
         @data[token] = data
         w.signal
       when QueryHandle
         w.callback(data)
-        @waiters.delete(token)
       when nil
         # nothing
       else
