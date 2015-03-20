@@ -89,7 +89,6 @@ def brun4(x, handler)
 end
 $runners = [method(:run1), method(:run2), method(:run3), method(:run4),
             method(:brun1), method(:brun2), method(:brun3), method(:brun4)]
-$runners = [$runners[0]]
 
 r.table_create('test').run rescue nil
 r.table('test').delete.run
