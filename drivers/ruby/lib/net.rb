@@ -13,18 +13,22 @@ module RethinkDB
   class EM_Guard
     @@mutex = Mutex.new
     @@registered = false
-    @@conns = []
+    @@conns = Set.new
     def self.register(conn)
       @@mutex.synchronize {
         if !@@registered
           @@registered = true
-          EM.add_shutdown_hook{EM_Guard.remove_em_waiters}
+          EM.add_shutdown_hook {
+            EM_Guard.remove_em_waiters
+          }
         end
         @@conns += [conn]
       }
     end
     def self.unregister(conn)
-      @@conns -= [conn]
+      @@mutex.synchronize {
+        @@conns -= [conn]
+      }
     end
     def self.remove_em_waiters
       old_conns = Set.new
@@ -42,7 +46,7 @@ module RethinkDB
 
   class Handler
     def initialize
-      @stopped = @opened = @closed = false
+      @stopped = false
     end
     def handle(m, args, caller)
       if !stopped?
@@ -126,6 +130,11 @@ module RethinkDB
         @closed = true
       end
     end
+    def safe_next_tick(&b)
+      EM.next_tick {
+        b.call if !@closed
+      }
+    end
     def callback(res)
       begin
         if @handler.stopped? || !EM.reactor_running?
@@ -139,11 +148,11 @@ module RethinkDB
                                   Response::ResponseNote::UNIONED_FEED]) != []
           if (res['t'] == Response::ResponseType::SUCCESS_PARTIAL) ||
               (res['t'] == Response::ResponseType::SUCCESS_SEQUENCE)
-            EM.next_tick {
+            safe_next_tick {
               handle_open
               if res['t'] == Response::ResponseType::SUCCESS_PARTIAL
-                @conn.register_query(@token, @all_opts, self)
-                @conn.dispatch([Query::QueryType::CONTINUE], @token)
+                @conn.register_query(@token, @all_opts, self) if !@conn.closed?
+                @conn.dispatch([Query::QueryType::CONTINUE], @token) if !@conn.closed?
               end
               Shim.response_to_native(res, @msg, @all_opts).each {|row|
                 if is_cfeed
@@ -164,12 +173,14 @@ module RethinkDB
                   handle(:on_stream_val, row)
                 end
               }
-              if res['t'] == Response::ResponseType::SUCCESS_SEQUENCE
+              if (res['t'] == Response::ResponseType::SUCCESS_SEQUENCE ||
+                  @conn.closed?)
                 handle_close
               end
             }
           elsif res['t'] == Response::ResponseType::SUCCESS_ATOM
-            EM.next_tick {
+            safe_next_tick {
+              return if @closed
               handle_open
               val = Shim.response_to_native(res, @msg, @all_opts)
               if val.is_a?(Array)
@@ -180,7 +191,8 @@ module RethinkDB
               handle_close
             }
           elsif res['t'] == Response::ResponseType::WAIT_COMPLETE
-            EM.next_tick {
+            safe_next_tick {
+              return if @closed
               handle_open
               handle(:on_wait_complete)
               handle_close
@@ -192,17 +204,22 @@ module RethinkDB
             rescue Exception => e
               exc = e
             end
-            EM.next_tick {
+            safe_next_tick {
+              return if @closed
               handle_open
               handle(:on_error, e)
               handle_close
             }
           end
         else
-          EM.next_tick{handle_close}
+          safe_next_tick {
+            return if @closed
+            handle_close
+          }
         end
       rescue Exception => e
-        EM.next_tick {
+        safe_next_tick {
+          return if @closed
           handle_open
           handle(:on_error, e)
           handle_close
@@ -257,7 +274,8 @@ module RethinkDB
         when Handler
           block = arg
         else
-          raise ArgumentError, "Unexpected argument #{arg.inspect}."
+          raise ArgumentError, "Unexpected argument #{arg.inspect} " +
+            "(got #{args.inspect})."
         end
       }
       if (tf = opts[:time_format])
@@ -603,8 +621,11 @@ module RethinkDB
       self
     end
 
-    def is_open()
+    def is_open
       @socket && @listener
+    end
+    def closed?
+      !is_open
     end
 
     def close(opts={})
@@ -616,6 +637,20 @@ module RethinkDB
       end
       opts[:noreply_wait] = true if !opts.keys.include?(:noreply_wait)
 
+      @listener_mutex.safe_synchronize {
+        @opts.clear
+        @data.clear
+        @waiters.values.each {|w|
+          case w
+          when QueryHandle
+            w.handle_close
+          when ConditionVariable
+            w.signal
+          end
+        }
+        @waiters.clear
+      }
+
       noreply_wait() if opts[:noreply_wait] && is_open()
       if @listener
         @listener.terminate
@@ -624,12 +659,6 @@ module RethinkDB
       @socket.close if @socket
       @listener = nil
       @socket = nil
-      @listener_mutex.safe_synchronize {
-        @opts.clear
-        @data.clear
-        @waiters.values.each{ |w| w.signal }
-        @waiters.clear
-      }
       self
     end
 
