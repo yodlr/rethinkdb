@@ -94,7 +94,6 @@ $runners = [$runners[0]]
 r.table_create('test').run rescue nil
 r.table('test').delete.run
 r.table('test').insert({id: 0}).run
-EM.threadpool_size = 1000
 EM.run {
   $lambda_state = []
   $lambda = lambda {|err, row| $lambda_state << [err, row]}
