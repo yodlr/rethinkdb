@@ -99,6 +99,33 @@ module RethinkDB
     end
   end
 
+  class CallbackHandler < Handler
+    def initialize(callback)
+      if callback.arity > 2
+        raise ArgumentError, "Wrong number of arguments for callback (callback " +
+          "accepts #{callback.arity} arguments, but it should accept 0, 1 or 2)."
+      end
+      @callback = callback
+    end
+    def do_call(err, val)
+      if @callback.arity == 0
+        raise err if err
+        @callback.call
+      elsif @callback.arity == 1
+        raise err if err
+        @callback.call(val)
+      elsif @callback.arity == 2 || @callback.arity == -1
+        @callback.call(err, val)
+      end
+    end
+    def on_val(x)
+      do_call(nil, x)
+    end
+    def on_error(err)
+      do_call(err, nil)
+    end
+  end
+
   class QueryHandle
     def initialize(handler, msg, all_opts, token, conn)
       @handler = handler
@@ -229,33 +256,6 @@ module RethinkDB
           handle_close
         }
       end
-    end
-  end
-
-  class CallbackHandler < Handler
-    def initialize(callback)
-      if callback.arity > 2
-        raise ArgumentError, "Wrong number of arguments for callback (callback " +
-          "accepts #{callback.arity} arguments, but it should accept 0, 1 or 2)."
-      end
-      @callback = callback
-    end
-    def do_call(err, val)
-      if @callback.arity == 0
-        raise err if err
-        @callback.call
-      elsif @callback.arity == 1
-        raise err if err
-        @callback.call(val)
-      elsif @callback.arity == 2 || @callback.arity == -1
-        @callback.call(err, val)
-      end
-    end
-    def on_val(x)
-      do_call(nil, x)
-    end
-    def on_error(err)
-      do_call(err, nil)
     end
   end
 
