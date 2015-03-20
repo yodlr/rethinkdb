@@ -29,7 +29,7 @@ def with_absolute_timeout(deadline, generator, io_loop):
     else:
         try:
             res = yield gen.with_timeout(deadline, generator, io_loop=io_loop)
-        except TimeoutError:
+        except gen.TimeoutError:
             raise RqlTimeoutError()
     raise gen.Return(res)
 
