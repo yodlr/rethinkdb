@@ -263,25 +263,32 @@ module RethinkDB
     @@default_conn = nil
     def self.set_default_conn c; @@default_conn = c; end
     def parse(*args, &b)
-      conn = @@default_conn
-      opts = {}
-      block = b
+      conn = nil
+      opts = nil
+      block = nil
       args = args.map{|x| x.is_a?(Class) ? x.new : x}
       args.each {|arg|
         case arg
         when RethinkDB::Connection
+          raise ArgumentError, "Unexpected second Connection #{arg.inspect}." if conn
           conn = arg
         when Hash
+          raise ArgumentError, "Unexpected second Hash #{arg.inspect}." if opts
           opts = arg
         when Proc
+          raise ArgumentError, "Unexpected second callback #{arg.inspect}." if block
           block = arg
         when Handler
+          raise ArgumentError, "Unexpected second callback #{arg.inspect}." if block
           block = arg
         else
           raise ArgumentError, "Unexpected argument #{arg.inspect} " +
             "(got #{args.inspect})."
         end
       }
+      conn = @@default_conn if !conn
+      opts = {} if !opts
+      block = b if !block
       if (tf = opts[:time_format])
         opts[:time_format] = (tf = tf.to_s)
         if tf != 'raw' && tf != 'native'
