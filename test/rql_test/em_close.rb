@@ -20,20 +20,20 @@ class Accumulator < RethinkDB::Handler
     @acc = []
     @seen = @opened = 0
   end
-  def on_open(conn)
+  def on_open(handle)
     @opened += 1
     if @opened == 2
       r.table('test').insert({id: 0}).run(noreply: true)
     end
-    @acc << [:on_open, conn]
+    @acc << [:on_open, handle]
   end
   def on_close(*args)
     @acc << [:on_close, *args]
   end
-  def on_val(val, conn)
-    @acc << [:on_val, val, conn]
+  def on_val(val, handle)
+    @acc << [:on_val, val, handle]
     @seen += 1
-    if conn == $f2
+    if handle == $f2
       $f2.close
       r.table('test').insert({id: 1}).run(noreply: true)
     elsif @seen == 3
