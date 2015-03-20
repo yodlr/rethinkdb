@@ -33,9 +33,13 @@ EM.run {
 }
 $state << [0, RethinkDB::EM_Guard.class_eval("@@conns.size")]
 
-$exp = [[:o, 1], [:o, 2], [:o, 3], [3, 3], [:c, 1], [2, 2], [:c, 2], [:c, 3], [0, 0]]
+# Either of these are legal depending on whether `$f3` is in
+# `@waiters` or attempting to acquire `@@listener_mutex` inside
+# `EM.tick`.
+$exp1 = [[:o, 1], [:o, 2], [:o, 3], [3, 3], [:c, 1], [2, 2], [:c, 2], [:c, 3], [0, 0]]
+$exp2 = [[:o, 1], [:o, 2], [:o, 3], [3, 3], [2, 2], [:c, 1], [:c, 2], [:c, 3], [0, 0]]
 
-if $state != $exp
+if $state != $exp1 && $state != $exp2
   raise RuntimeError, "Incorrect state: #{$state.inspect}."
 end
 if [$f1, $f2, $f3].any?{|f| !f.closed?}

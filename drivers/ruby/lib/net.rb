@@ -58,33 +58,33 @@ module RethinkDB
       end
     end
 
-    def on_open
+    def on_open(caller)
     end
-    def on_close
+    def on_close(caller)
     end
-    def on_wait_complete
+    def on_wait_complete(caller)
     end
 
-    def on_error(err)
+    def on_error(err, caller)
       raise err
     end
-    def on_val(val)
+    def on_val(val, caller)
     end
-    def on_array(arr, conn)
+    def on_array(arr, caller)
       arr.each {|x|
         break if stopped?
-        handle(:on_stream_val, [x], conn)
+        handle(:on_stream_val, [x], caller)
       }
     end
-    def on_atom(val, conn)
-      handle(:on_val, [val], conn)
+    def on_atom(val, caller)
+      handle(:on_val, [val], caller)
     end
-    def on_stream_val(val, conn)
-      handle(:on_val, [val], conn)
+    def on_stream_val(val, caller)
+      handle(:on_val, [val], caller)
     end
 
-    def on_unhandled_change(val, conn)
-      handle(:on_stream_val, [val], conn)
+    def on_unhandled_change(val, caller)
+      handle(:on_stream_val, [val], caller)
     end
 
     def stop

@@ -1,3 +1,4 @@
+require 'set'
 require 'eventmachine'
 require_relative './importRethinkDB.rb'
 
@@ -66,7 +67,7 @@ $expected = [[:on_open, $f1],
              [:on_close, $f2],
              [:on_val, {"f"=>1, "new_val"=>{"id"=>1}, "old_val"=>nil}, $f1]]
 
-if $a.acc != $expected
+if Set.new($a.acc) != Set.new($expected)
   raise RuntimeError, "Unexpected output:\n" + sanitize($a.acc).inspect +
-    "VS:\n" + sanitize($expected).inspect
+    "\nVS:\n" + sanitize($expected).inspect
 end
