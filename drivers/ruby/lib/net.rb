@@ -1,3 +1,4 @@
+require 'set'
 require 'socket'
 require 'thread'
 require 'timeout'
@@ -17,13 +18,16 @@ module RethinkDB
       @@mutex.synchronize {
         if !@@registered
           @@registered = true
-          EM.add_shutdown_hook{EM_Guard.unregister}
+          EM.add_shutdown_hook{EM_Guard.remove_em_waiters}
         end
-        @@conns |= [conn]
+        @@conns += [conn]
       }
     end
-    def self.unregister
-      old_conns = []
+    def self.unregister(conn)
+      @@conns -= [conn]
+    end
+    def self.remove_em_waiters
+      old_conns = Set.new
       @@mutex.synchronize {
         @@registered = false
         @@conns, old_conns = old_conns, @@conns
@@ -604,6 +608,7 @@ module RethinkDB
     end
 
     def close(opts={})
+      EM_Guard.unregister(self)
       raise ArgumentError, "Argument to close must be a hash." if opts.class != Hash
       if !(opts.keys - [:noreply_wait]).empty?
         raise ArgumentError, "close does not understand these options: " +
