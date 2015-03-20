@@ -142,7 +142,7 @@ class TestCaseCompatible(unittest.TestCase):
     @gen.coroutine
     def asyncAssertRaisesRegexp(self, exception, regexp, generator):
         try:
-            x = yield generator
+            yield generator
         except Exception as e:
             self.assertTrue(isinstance(e, exception),
                             '%s expected to raise %s but '
@@ -592,7 +592,7 @@ class TestGetIntersectingBatching(TestWithConnection):
                 self.assertEqual(reference.count(row), 1)
                 reference.remove(row)
             yield self.asyncAssertRaises(StopIteration, next(itr))
-            self.assertTrue(cursor.error == False)
+            self.assertEqual(cursor.error, False)
 
         self.assertTrue(seen_lazy)
 
