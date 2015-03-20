@@ -16,6 +16,7 @@ import time
 import traceback
 import unittest
 import functools
+import socket
 from tornado import gen, ioloop
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)),
@@ -259,33 +260,41 @@ class TestWithConnection(TestCaseCompatible):
 
 # == Test Classes
 
-class TestNoConnection(TestCaseCompatible):
 
+class TestNoConnection(TestCaseCompatible):
     # No servers started yet so this should fail
+    @gen.coroutine
     def test_connect(self):
         if not use_default_port:
             self.skipTest("Not testing default port")
-            return # in case we fell back on replacement_skip
+            raise gen.Return()  # in case we fell back on replacement_skip
         yield self.asyncAssertRaisesRegexp(r.RqlDriverError,
-            "Could not connect to localhost:%d." % DEFAULT_DRIVER_PORT,
-            r.connect)
+                                           "Could not connect to localhost:%d."
+                                           % DEFAULT_DRIVER_PORT,
+                                           r.connect())
 
+    @gen.coroutine
     def test_connect_port(self):
         port = utils.get_avalible_port()
         yield self.asyncAssertRaisesRegexp(r.RqlDriverError,
-            "Could not connect to localhost:%d." % port,
-            r.connect, port=port)
+                                           "Could not connect to localhost:%d."
+                                           % port,
+                                           r.connect(port=port))
 
+    @gen.coroutine
     def test_connect_host(self):
         if not use_default_port:
             self.skipTest("Not testing default port")
-            return # in case we fell back on replacement_skip
+            raise gen.Return()  # in case we fell back on replacement_skip
         yield self.asyncAssertRaisesRegexp(r.RqlDriverError,
-            "Could not connect to 0.0.0.0:%d." % DEFAULT_DRIVER_PORT,
-            r.connect, host="0.0.0.0")
+                                           "Could not connect to 0.0.0.0:%d."
+                                           % DEFAULT_DRIVER_PORT,
+                                           r.connect(host="0.0.0.0"))
 
+    @gen.coroutine
     def test_connect_timeout(self):
-        '''Test that we get a ReQL error if we connect to a non-responsive port'''
+        # Test that we get a ReQL error if we connect to a
+        # non-responsive port
         useSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         useSocket.bind(('localhost', 0))
         useSocket.listen(0)
@@ -294,31 +303,36 @@ class TestNoConnection(TestCaseCompatible):
 
         try:
             yield self.asyncAssertRaisesRegexp(r.RqlDriverError,
-                "Could not connect to %s:%d. Error: timed out" % (host, port),
-                r.connect, host=host, port=port, timeout=2)
+                                               "Connection interrupted during"
+                                               " handshake with %s:%d. "
+                                               "Error: Operation timed out."
+                                               % (host, port),
+                                               r.connect(host=host, port=port,
+                                                         timeout=2))
         finally:
             useSocket.close()
 
-    def test_connect_host(self):
-        port = utils.get_avalible_port()
-        yield self.asyncAssertRaisesRegexp(r.RqlDriverError,
-            "Could not connect to 0.0.0.0:%d." % port,
-            r.connect, host="0.0.0.0", port=port)
-
+    @gen.coroutine
     def test_empty_run(self):
-        # Test the error message when we pass nothing to run and didn't call `repl`
+        # Test the error message when we pass nothing to run and
+        # didn't call `repl`
         yield self.asyncAssertRaisesRegexp(r.RqlDriverError,
-            "RqlQuery.run must be given a connection to run on.",
-            r.expr(1).run)
+                                           "RqlQuery.run must be given"
+                                           " a connection to run on.",
+                                           r.expr(1).run())
 
+    @gen.coroutine
     def test_auth_key(self):
         # Test that everything still doesn't work even with an auth key
         if not use_default_port:
             self.skipTest("Not testing default port")
-            return # in case we fell back on replacement_skip
+            raise gen.Return()  # in case we fell back on replacement_skip
         yield self.asyncAssertRaisesRegexp(r.RqlDriverError,
-            'Could not connect to 0.0.0.0:%d."' % DEFAULT_DRIVER_PORT,
-            r.connect, host="0.0.0.0", port=DEFAULT_DRIVER_PORT, auth_key="hunter2")
+                                           'Could not connect to 0.0.0.0:%d."'
+                                           % DEFAULT_DRIVER_PORT,
+                                           r.connect(host="0.0.0.0",
+                                                     port=DEFAULT_DRIVER_PORT,
+                                                     auth_key="hunter2"))
 
 
 class TestConnection(TestWithConnection):
