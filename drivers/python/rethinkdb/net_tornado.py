@@ -120,7 +120,7 @@ class ConnectionInstance(object):
         message = decodeUTF(response[:-1]).split('\n')[0]
 
         if message != 'SUCCESS':
-            self.close(False, None)
+            yield self.close(False, None)
             raise RqlDriverError('Server dropped connection with message: "%s"' %
                                message)
 
@@ -135,7 +135,7 @@ class ConnectionInstance(object):
     def close(self, noreply_wait, token, exception=None):
         self._closing = True
         if exception is not None:
-            err_message = "Connection is closed (%s)." + str(exception)
+            err_message = "Connection is closed (%s)." % str(exception)
         else:
             err_message = "Connection is closed."
 
@@ -210,7 +210,7 @@ class ConnectionInstance(object):
                     raise RqlDriverError("Unexpected response received.")
         except Exception as ex:
             if not self._closing:
-                self.close(False, None, ex)
+                yield self.close(False, None, ex)
 
 
 # Wrap functions from the base connection class that may throw - these will
