@@ -18,7 +18,7 @@ import unittest
 import functools
 import socket
 from tornado import gen, ioloop
-from tornado.concurrent import Future
+from tornado.concurrent import Future, chain_future
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                 os.pardir, os.pardir, "common"))
@@ -680,8 +680,6 @@ class TestSuccessAtomFeed(TestWithConnection):
         c = yield r.connect(host=sharedServerHost,
                             port=sharedServerDriverPort)
 
-        from rethinkdb import ql2_pb2 as p
-
         if 'success_atom_feed' in (yield r.db('test').table_list().run(c)):
             yield r.db('test').table_drop('success_atom_feed').run(c)
         yield r.db('test').table_create('success_atom_feed').run(c)
@@ -698,6 +696,7 @@ class TestSuccessAtomFeed(TestWithConnection):
         changes = yield t1.get(0).changes().run(c)
         self.assertTrue(changes.error is None)
         self.assertEqual(len(changes.items), 1)
+
 
 class TestCursor(TestWithConnection):
     @gen.coroutine
@@ -729,7 +728,8 @@ class TestCursor(TestWithConnection):
                 cursor.close()
 
         self.asyncAssertRaisesRegexp(r.RqlRuntimeError,
-            "Connection is closed.", read_cursor(cursor))
+                                     "Connection is closed.",
+                                     read_cursor(cursor))
 
     @gen.coroutine
     def test_cursor_after_cursor_close(self):
@@ -917,9 +917,12 @@ class TestChangefeeds(TestWithConnection):
         if 'b' in (yield r.db('test').table_list().run(self.conn)):
             yield r.db('test').table_drop('b').run(self.conn)
         yield r.db('test').table_create('b').run(self.conn)
+        self._sentinel = object()
+        self._cancel_future = Future()
 
     @gen.coroutine
     def tearDown(self):
+        self._cancel_future.set_result(self._sentinel)
         yield r.db('test').table_drop('b').run(self.conn)
         yield r.db('test').table_drop('a').run(self.conn)
         yield TestWithConnection.tearDown(self)
@@ -944,15 +947,14 @@ class TestChangefeeds(TestWithConnection):
     @gen.coroutine
     def cfeed_noticer(self, table):
         feed = yield r.db('test').table(table).changes(squash=False).run(self.conn)
-        try:
-            self._feeds_ready[table].set_result(True)
-            for cursor in feed:
-                item = yield cursor
-                self.assertIsNone(item['old_val'])
-                self._seen_values[table].add(item['new_val']['id'])
-        except r.RqlRuntimeError:
-            # indicates termination of connection
-            pass
+        self._feeds_ready[table].set_result(True)
+        for cursor in feed:
+            chain_future(self._cancel_future, cursor)
+            item = yield cursor
+            if item is self._sentinel:
+                return
+            self.assertIsNone(item['old_val'])
+            self._seen_values[table].add(item['new_val']['id'])
 
     @gen.coroutine
     def test_multiple_changefeeds(self):
