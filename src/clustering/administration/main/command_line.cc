@@ -47,14 +47,9 @@
 #define RETHINKDB_RESTORE_SCRIPT "rethinkdb-restore"
 #define RETHINKDB_INDEX_REBUILD_SCRIPT "rethinkdb-index-rebuild"
 
-MUST_USE bool numwrite(const char *path, int number) {
-    // Try to figure out what this function does.
-    FILE *fp1 = fopen(path, "w");
-    if (fp1 == NULL) {
-        return false;
-    }
-    fprintf(fp1, "%d", number);
-    fclose(fp1);
+MUST_USE bool write_num_and_close(FILE *file_handle, int number) {
+    fprintf(file_handle, "%d", number);
+    fclose(file_handle);
     return true;
 }
 
@@ -78,6 +73,7 @@ int check_pid_file(const std::string &pid_filepath) {
     // Make a copy of the filename since `dirname` may modify it
     char pid_dir[PATH_MAX];
     strncpy(pid_dir, pid_filepath.c_str(), PATH_MAX);
+    pid_dir[PATH_MAX - 1] = 0;
     if (access(dirname(pid_dir), W_OK) == -1) {
         logERR("Cannot access the pid-file directory.");
         return EXIT_FAILURE;
@@ -86,12 +82,9 @@ int check_pid_file(const std::string &pid_filepath) {
     return EXIT_SUCCESS;
 }
 
-int write_pid_file(const std::string &pid_filepath) {
+int open_pid_file(const std::string &pid_filepath, FILE **pid_file_handle){
     guarantee(pid_filepath.size() > 0);
 
-    // Be very careful about modifying this. It is important that the code that removes the
-    // pid-file only run if the checks here pass. Right now, this is guaranteed by the return on
-    // failure here.
     if (!pid_file.empty()) {
         logERR("Attempting to write pid-file twice.");
         return EXIT_FAILURE;
@@ -101,11 +94,19 @@ int write_pid_file(const std::string &pid_filepath) {
         return EXIT_FAILURE;
     }
 
-    if (!numwrite(pid_filepath.c_str(), getpid())) {
+    pid_file = pid_filepath;
+
+    *pid_file_handle = fopen(pid_filepath.c_str(), "w");
+
+    return *pid_file_handle == NULL ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+int write_pid_file(FILE* pid_file_handle) {
+    if (!write_num_and_close(pid_file_handle, getpid())) {
         logERR("Writing to the specified pid-file failed.");
         return EXIT_FAILURE;
     }
-    pid_file = pid_filepath;
+
     atexit(remove_pid_file);
 
     return EXIT_SUCCESS;
@@ -296,13 +297,19 @@ void get_and_set_user_group(const std::map<std::string, options::values_t> &opts
 
 void get_and_set_user_group_and_directory(
         const std::map<std::string, options::values_t> &opts,
-        directory_lock_t *directory_lock) {
+        directory_lock_t *directory_lock,
+        FILE *pid_file_handle) {
     std::string group_name, user_name;
     gid_t group_id;
     uid_t user_id;
 
     get_user_group(opts, &group_id, &group_name, &user_id, &user_name);
     directory_lock->change_ownership(group_id, group_name, user_id, user_name);
+    if (pid_file_handle != NULL) {
+        if (user_id != INVALID_UID || group_id != INVALID_GID) {
+            fchown(fileno(pid_file_handle), user_id, group_id);
+        }
+    }
     set_user_group(group_id, group_name, user_id, user_name);
 }
 
@@ -315,14 +322,27 @@ int check_pid_file(const std::map<std::string, options::values_t> &opts) {
     return check_pid_file(*pid_filepath);
 }
 
-// Maybe writes a pid file, using the --pid-file option, if it's present.
-int write_pid_file(const std::map<std::string, options::values_t> &opts) {
+// Maybe opens a pid file, using the --pid-file option, if it's present.
+int open_pid_file(const std::map<std::string, options::values_t> &opts, FILE **pid_file_handle) {
     boost::optional<std::string> pid_filepath = get_optional_option(opts, "--pid-file");
     if (!pid_filepath || pid_filepath->empty()) {
+        *pid_file_handle = NULL;
         return EXIT_SUCCESS;
     }
 
-    return write_pid_file(*pid_filepath);
+    return open_pid_file(*pid_filepath, pid_file_handle);
+}
+
+int write_pid_file(const std::map<std::string, options::values_t> &opts) {
+    FILE *pid_file_handle;
+    if (open_pid_file(opts, &pid_file_handle) != EXIT_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+
+    if (pid_file_handle != NULL && write_pid_file(pid_file_handle) != EXIT_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
 }
 
 // Extracts an option that must appear exactly once.  (This is often used for optional arguments
@@ -1322,7 +1342,7 @@ int main_rethinkdb_create(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
 
-        get_and_set_user_group_and_directory(opts, &data_directory_lock);
+        get_and_set_user_group_and_directory(opts, &data_directory_lock, NULL);
 
         initialize_logfile(opts, base_path);
 
@@ -1665,8 +1685,13 @@ int main_rethinkdb_porcelain(int argc, char *argv[]) {
         bool is_new_directory = false;
         directory_lock_t data_directory_lock(base_path, true, &is_new_directory);
 
+        FILE *pid_file_handle;
+        if (open_pid_file(opts, &pid_file_handle) != EXIT_SUCCESS) {
+            return EXIT_FAILURE;
+        }
+
         if (is_new_directory) {
-            get_and_set_user_group_and_directory(opts, &data_directory_lock);
+            get_and_set_user_group_and_directory(opts, &data_directory_lock, pid_file_handle);
         } else {
             get_and_set_user_group(opts);
         }
@@ -1689,10 +1714,6 @@ int main_rethinkdb_porcelain(int argc, char *argv[]) {
         boost::optional<boost::optional<uint64_t> > total_cache_size =
             parse_total_cache_size_option(opts);
 
-        if (check_pid_file(opts) != EXIT_SUCCESS) {
-            return EXIT_FAILURE;
-        }
-
         if (!maybe_daemonize(opts)) {
             // This is the parent process of the daemon, just exit
             // Make sure the parent process doesn't remove the directory,
@@ -1701,7 +1722,7 @@ int main_rethinkdb_porcelain(int argc, char *argv[]) {
             return EXIT_SUCCESS;
         }
 
-        if (write_pid_file(opts) != EXIT_SUCCESS) {
+        if (pid_file_handle != NULL && write_pid_file(pid_file_handle) != EXIT_SUCCESS) {
             return EXIT_FAILURE;
         }
 
