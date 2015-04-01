@@ -21,7 +21,7 @@ public:
     ~unusual_size_allocator_t() {}
 
     typedef T value_type;
-    typedef std::allocator_traits<unusual_size_allocator_t<T> > traits;
+    typedef boost::container::allocator_traits<unusual_size_allocator_t<T> > traits;
 
     T* allocate(size_t n);
     void deallocate(T* region, size_t n);

@@ -5,6 +5,7 @@
 #include <memory>
 #include <functional>
 
+#include <boost/container/allocator_traits.hpp>
 #include "threading.hpp"
 
 class tracking_allocator_factory_t;
@@ -24,7 +25,7 @@ template <class T>
 class rethinkdb_allocator_t {
 public:
     typedef T value_type;
-    typedef std::allocator_traits<rethinkdb_allocator_t<T> > traits;
+    typedef boost::container::allocator_traits<rethinkdb_allocator_t<T> > traits;
 
     virtual ~rethinkdb_allocator_t() {}
 

@@ -137,7 +137,7 @@ public:
 
 template <class Alloc>
 struct deallocator_alloc_t : public deallocator_base_t {
-    typedef std::allocator_traits<Alloc> traits;
+    typedef boost::container::allocator_traits<Alloc> traits;
     Alloc allocator;
     typename traits::pointer object;
     deallocator_alloc_t(Alloc &allocator_, typename traits::pointer object_)
