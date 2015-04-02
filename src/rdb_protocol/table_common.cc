@@ -1,6 +1,8 @@
 // Copyright 2010-2014 RethinkDB, all rights reserved.
 #include "rdb_protocol/table_common.hpp"
 
+#include "rdb_protocol/datum_builder.hpp"
+
 std::string error_message_index_not_found(
         const std::string &sindex, const std::string &table) {
     return strprintf("Index `%s` was not found on table `%s`",
@@ -156,4 +158,3 @@ ql::datum_t resolve_insert_conflict(
                      insert_row.print().c_str());
     }
 }
-

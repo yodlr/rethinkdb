@@ -4,6 +4,7 @@
 #include "arch/runtime/coroutines.hpp"
 #include "containers/scoped.hpp"
 #include "containers/scoped_regex.hpp"
+#include "rdb_protocol/datum_builder.hpp"
 #include "logger.hpp"
 #include "perfmon/core.hpp"
 #include "utils.hpp"
@@ -153,4 +154,3 @@ perfmon_collection_t &get_global_perfmon_collection() {
     static perfmon_collection_t collection;
     return collection;
 }
-

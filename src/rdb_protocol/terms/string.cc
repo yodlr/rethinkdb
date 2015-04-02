@@ -8,6 +8,7 @@
 #include <algorithm>
 
 #include "parsing/utf8.hpp"
+#include "rdb_protocol/datum_builder.hpp"
 #include "rdb_protocol/error.hpp"
 #include "rdb_protocol/op.hpp"
 

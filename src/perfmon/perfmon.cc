@@ -10,6 +10,7 @@
 
 #include "concurrency/pmap.hpp"
 #include "arch/arch.hpp"
+#include "rdb_protocol/datum_builder.hpp"
 
 static const char *stat_avg = "avg";
 static const char *stat_min = "min";
@@ -346,4 +347,3 @@ std::string perfmon_duration_sampler_t::call(UNUSED int argc, UNUSED char **argv
         return "Disabled\n";
     }
 }
-

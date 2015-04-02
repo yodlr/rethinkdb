@@ -17,6 +17,7 @@
 #include "rdb_protocol/geo/s2/s2polyline.h"
 #include "rdb_protocol/configured_limits.hpp"
 #include "rdb_protocol/datum.hpp"
+#include "rdb_protocol/datum_builder.hpp"
 #include "rdb_protocol/pseudo_geometry.hpp"
 
 using geo::S1Angle;
@@ -411,4 +412,3 @@ void validate_geojson(const ql::datum_t &geojson) {
     validator_t validator;
     visit_geojson(&validator, geojson);
 }
-

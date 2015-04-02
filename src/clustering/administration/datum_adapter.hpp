@@ -9,6 +9,7 @@
 #include "containers/name_string.hpp"
 #include "rdb_protocol/context.hpp"
 #include "rdb_protocol/datum.hpp"
+#include "rdb_protocol/datum_builder.hpp"
 #include "time.hpp"
 
 class cluster_semilattice_metadata_t;
@@ -195,4 +196,3 @@ private:
 };
 
 #endif /* CLUSTERING_ADMINISTRATION_DATUM_ADAPTER_HPP_ */
-

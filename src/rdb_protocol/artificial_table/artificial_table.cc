@@ -2,6 +2,7 @@
 #include "rdb_protocol/artificial_table/artificial_table.hpp"
 
 #include "rdb_protocol/artificial_table/backend.hpp"
+#include "rdb_protocol/datum_builder.hpp"
 #include "rdb_protocol/env.hpp"
 #include "rdb_protocol/func.hpp"
 #include "rdb_protocol/table_common.hpp"
@@ -289,4 +290,3 @@ void artificial_table_t::do_single_update(
     *stats_inout = (*stats_inout).merge(
         resp, ql::stats_merge, env->limits(), conditions_inout);
 }
-

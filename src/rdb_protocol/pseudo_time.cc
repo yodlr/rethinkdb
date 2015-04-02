@@ -8,6 +8,7 @@
 #include <boost/date_time.hpp>
 
 #include "rdb_protocol/datum.hpp"
+#include "rdb_protocol/datum_builder.hpp"
 #include "utils.hpp"
 
 namespace ql {

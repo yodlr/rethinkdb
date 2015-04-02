@@ -6,6 +6,7 @@
 
 #include "containers/scoped_regex.hpp"
 #include "logger.hpp"
+#include "rdb_protocol/datum_builder.hpp"
 #include "perfmon/core.hpp"
 #include "utils.hpp"
 

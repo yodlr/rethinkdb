@@ -5,6 +5,7 @@
 #include "rdb_protocol/geo/ellipsoid.hpp"
 #include "rdb_protocol/geo/distances.hpp"
 #include "rdb_protocol/context.hpp"
+#include "rdb_protocol/datum_builder.hpp"
 #include "rdb_protocol/env.hpp"
 #include "rdb_protocol/func.hpp"
 #include "rdb_protocol/math_utils.hpp"
@@ -418,4 +419,3 @@ void real_table_t::write_with_profile(ql::env_t *env, write_t *write,
     /* Append the results of the profile to the current task */
     splitter.give_splits(response->n_shards, response->event_log);
 }
-

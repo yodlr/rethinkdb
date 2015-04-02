@@ -5,6 +5,7 @@
 
 #include "boost_utils.hpp"
 #include "rdb_protocol/batching.hpp"
+#include "rdb_protocol/datum_builder.hpp"
 #include "rdb_protocol/env.hpp"
 #include "rdb_protocol/func.hpp"
 #include "rdb_protocol/term.hpp"

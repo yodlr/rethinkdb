@@ -2,6 +2,7 @@
 
 #include <limits>
 
+#include "rdb_protocol/datum_builder.hpp"
 #include "rdb_protocol/geo/distances.hpp"
 #include "rdb_protocol/geo/ellipsoid.hpp"
 #include "rdb_protocol/geo/exceptions.hpp"
@@ -542,4 +543,3 @@ counted_t<term_t> make_polygon_sub_term(compile_env_t *env, const protob_t<const
 }
 
 } // namespace ql
-
