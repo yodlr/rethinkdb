@@ -8,6 +8,7 @@
 #include <utility>
 #include <memory>
 
+#include "allocation/traits.hpp"
 #include "allocation/utils.hpp"
 #include "containers/scoped.hpp"
 #include "errors.hpp"

@@ -1,6 +1,7 @@
 #ifndef ALLOCATION_UNUSUAL_ALLOCATOR_HPP
 #define ALLOCATION_UNUSUAL_ALLOCATOR_HPP
 
+#include "allocation/traits.hpp"
 #include "allocation/tracking_allocator.hpp"
 
 namespace allocation {
@@ -23,7 +24,7 @@ public:
     ~unusual_size_allocator_t() {}
 
     typedef T value_type;
-    typedef boost::container::allocator_traits<unusual_size_allocator_t<T> > traits;
+    typedef allocator_traits<unusual_size_allocator_t<T> > traits;
 
     T* allocate(size_t n);
     void deallocate(T* region, size_t n);
@@ -51,6 +52,6 @@ private:
     }
 };
 
-#endif // ALLOCATION_UNUSUAL_ALLOCATOR_HPP
 }; // namespace allocation
 
+#endif // ALLOCATION_UNUSUAL_ALLOCATOR_HPP

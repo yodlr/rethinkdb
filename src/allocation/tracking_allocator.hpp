@@ -5,7 +5,7 @@
 #include <memory>
 #include <functional>
 
-#include <boost/container/allocator_traits.hpp>
+#include "allocation/traits.hpp"
 #include "threading.hpp"
 
 namespace allocation {
@@ -26,7 +26,7 @@ template <class T>
 class rethinkdb_allocator_t {
 public:
     typedef T value_type;
-    typedef boost::container::allocator_traits<rethinkdb_allocator_t<T> > traits;
+    typedef allocator_traits<rethinkdb_allocator_t<T> > traits;
 
     virtual ~rethinkdb_allocator_t() {}
 
