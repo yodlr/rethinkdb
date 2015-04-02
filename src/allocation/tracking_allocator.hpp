@@ -26,7 +26,7 @@ template <class T>
 class rethinkdb_allocator_t {
 public:
     typedef T value_type;
-    typedef allocator_traits<rethinkdb_allocator_t<T> > traits;
+    typedef typename traits<typename allocation::rethinkdb_allocator_t<T> >::type traits;
 
     virtual ~rethinkdb_allocator_t() {}
 

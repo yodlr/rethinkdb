@@ -15,15 +15,24 @@
 #include <boost/container/allocator_traits.hpp>
 #endif
 
+// If gcc 4.6 supported alias templates we wouldn't have to do this.
 namespace allocation {
-    template<typename T> using allocator_traits = boost::container::allocator_traits<T>;
+    template <typename T>
+    class traits {
+    public:
+        typedef boost::container::allocator_traits<T> type;
+    };
 }; // namespace allocation
 
 #else
 #include <memory>
 
 namespace allocation {
-    template<typename T> using allocator_traits = std::allocator_traits<T>;
+    template <typename T>
+    class traits {
+    public:
+        typedef std::allocator_traits<T> type;
+    };
 }; // namespace allocation
 
 #endif

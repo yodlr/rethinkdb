@@ -24,7 +24,7 @@ public:
     ~unusual_size_allocator_t() {}
 
     typedef T value_type;
-    typedef allocator_traits<unusual_size_allocator_t<T> > traits;
+    typedef typename traits<unusual_size_allocator_t<T> >::type traits;
 
     T* allocate(size_t n);
     void deallocate(T* region, size_t n);
