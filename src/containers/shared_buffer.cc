@@ -13,12 +13,12 @@ counted_t<shared_buf_t> shared_buf_t::create(size_t size) {
 }
 
 counted_t<shared_buf_t> shared_buf_t::create(size_t size,
-                                             std::shared_ptr<tracking_allocator_factory_t> f) {
-    unusual_size_allocator_t<shared_buf_t> a(f, size);
-    shared_buf_t *result = make<shared_buf_t>(std::allocator_arg, a, size);
+                                             std::shared_ptr<allocation::tracking_allocator_factory_t> f) {
+    allocation::unusual_size_allocator_t<shared_buf_t> a(f, size);
+    shared_buf_t *result = allocation::make<shared_buf_t>(std::allocator_arg, a, size);
     counted_set_deleter(result,
-                        std::unique_ptr<deallocator_alloc_t<unusual_size_allocator_t<shared_buf_t> > >
-                        (new deallocator_alloc_t<unusual_size_allocator_t<shared_buf_t> >(a, result)));
+                        std::unique_ptr<deallocator_alloc_t<allocation::unusual_size_allocator_t<shared_buf_t> > >
+                        (new deallocator_alloc_t<allocation::unusual_size_allocator_t<shared_buf_t> >(a, result)));
     return counted_t<shared_buf_t>(result);
 }
 

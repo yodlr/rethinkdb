@@ -3,6 +3,8 @@
 
 #include "rdb_protocol/error.hpp"
 
+namespace allocation {
+
 template <class T>
 T *tracking_allocator_t<T>::allocate(size_t n) {
     if (auto p = parent.lock()) {
@@ -36,3 +38,5 @@ size_t tracking_allocator_t<T>::max_size() const {
     if (auto p = parent.lock()) return p->left();
     return std::numeric_limits<size_t>::max();
 }
+
+}; // namespace allocation

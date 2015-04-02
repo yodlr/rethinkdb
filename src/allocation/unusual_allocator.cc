@@ -3,6 +3,8 @@
 #include "rdb_protocol/error.hpp"
 #include "containers/shared_buffer.hpp"
 
+namespace allocation {
+
 template <class T>
 T *unusual_size_allocator_t<T>::allocate(size_t n) {
     if (auto p = parent.lock()) {
@@ -27,3 +29,5 @@ size_t unusual_size_allocator_t<T>::max_size() const {
 }
 
 template class unusual_size_allocator_t<shared_buf_t>;
+
+}; // namespace allocation

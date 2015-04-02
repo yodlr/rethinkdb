@@ -8,6 +8,7 @@
 #include <boost/container/allocator_traits.hpp>
 #include "threading.hpp"
 
+namespace allocation {
 class tracking_allocator_factory_t;
 
 enum class allocator_types_t {
@@ -155,5 +156,7 @@ private:
 
     DISABLE_COPYING(tracking_allocator_factory_t);
 };
+
+}; // namespace allocation
 
 #endif /* ALLOCATION_TRACKING_ALLOCATOR_HPP_ */

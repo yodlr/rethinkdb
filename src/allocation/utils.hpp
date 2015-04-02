@@ -3,6 +3,8 @@
 
 #include <boost/container/allocator_traits.hpp>
 
+namespace allocation {
+
 template <class T, class Allocator, class... Args>
 T* make(std::allocator_arg_t, Allocator &alloc, Args&&... args) {
     T* result = boost::container::allocator_traits<Allocator>::allocate(alloc, 1);
@@ -17,3 +19,5 @@ T* make(std::allocator_arg_t, Allocator &alloc, Args&&... args) {
 }
 
 #endif // ALLOCATION_UTILS_HPP
+}; // namespace allocation
+

@@ -13,7 +13,7 @@ class shared_buf_t {
 public:
     static counted_t<shared_buf_t> create(size_t _size);
     static counted_t<shared_buf_t> create(size_t _size,
-                                          std::shared_ptr<tracking_allocator_factory_t> f);
+                                          std::shared_ptr<allocation::tracking_allocator_factory_t> f);
 
     // shared_buffer_t has an arbitrary length array in it, so we need
     // to define our own new / delete.  It's wrong to call new without

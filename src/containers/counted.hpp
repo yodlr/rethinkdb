@@ -137,7 +137,7 @@ public:
 
 template <class Alloc>
 struct deallocator_alloc_t : public deallocator_base_t {
-    typedef boost::container::allocator_traits<Alloc> traits;
+    typedef allocation::allocator_traits<Alloc> traits;
     Alloc allocator;
     typename traits::pointer object;
     deallocator_alloc_t(Alloc &allocator_, typename traits::pointer object_)
@@ -156,7 +156,7 @@ counted_t<T> make_counted(Args &&... args) {
 
 template <class T, class Alloc, class... Args>
 counted_t<T> make_counted(std::allocator_arg_t, const Alloc &a, Args &&... args) {
-    T* result = make<T>(std::allocator_arg, a, std::forward<Args>(args)...);
+    T* result = allocation::make<T>(std::allocator_arg, a, std::forward<Args>(args)...);
     counted_set_deleter(result,
                         std::unique_ptr<deallocator_alloc_t<Alloc> >
                         (new deallocator_alloc_t<Alloc>(a, result)));

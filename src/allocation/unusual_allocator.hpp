@@ -3,6 +3,8 @@
 
 #include "allocation/tracking_allocator.hpp"
 
+namespace allocation {
+
 // For weird types like shared_buf_t that have char[]s in them.  No
 // suballocators possible.
 template <typename T>
@@ -50,3 +52,5 @@ private:
 };
 
 #endif // ALLOCATION_UNUSUAL_ALLOCATOR_HPP
+}; // namespace allocation
+
