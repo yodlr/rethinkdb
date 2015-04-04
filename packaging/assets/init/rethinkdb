@@ -9,7 +9,7 @@
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
 # Short-Description: This starts a RethinkDB server
-# Description:       Launches the RethinkDB server configured in /etc/rethinkdb/
+# Description:       Launches the RethinkDB server configured in /etc/rethinkdb/server.conf
 ### END INIT INFO
 
 set -e -u
