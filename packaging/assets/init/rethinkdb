@@ -15,8 +15,11 @@
 set -e -u
 umask 022
 
-rethinkdb_bin=/usr/bin/rethinkdb ;
-rethinkdb_conf_dir=/etc/rethinkdb ;
+rethinkdb_bin=/usr/bin/rethinkdb
+rethinkdb_conf_dir=/etc/rethinkdb
+rethinkdb_pid_file=/var/run/rethinkdb.pid
+rethinkdb_log_file=/var/log/rethinkdb.log
+rethinkdb_conf_file="$rethinkdb_conf_dir/server.conf"
 
 # is_running <pid>
 # test if the process exists
@@ -31,20 +34,21 @@ usage_fail () {
 
 if [ ! -d "$rethinkdb_conf_dir/instances.d" ]; then # Post-2.1 config
 
-rethinkdb_pid_file=/var/run/rethinkdb.pid
-rethinkdb_log_file=/var/log/rethinkdb.log
-
 start () {
-    if [ -e "$rtdbpidfile" ]; then
+    if [ -e "$rethinkdb_pid_file" ]; then
         if is_running "`cat "$rethinkdb_pid_file"`"; then
             echo "rethinkdb: $instance_name: The instance has already started"
         else
             rm "$rethinkdb_pid_file"
         fi
     fi
+    if ! [ -e "$rethinkdb_conf_file" ]; then
+        echo "rethinkdb: Not starting: missing config file \`$rethinkdb_conf_file'" >&2
+        exit 1
+    fi
     echo "rethinkdb: Starting server. (logging to \`$rethinkdb_log_file')"
-    cd /var/lib
-    $rethinkdb_bin --config "$rethinkdb_conf_dir/server.conf" --log-file "$rethinkdb_log_file" --pid-file "$rethinkdb_pid_file" --daemon
+    cd /var/lib/rethinkdb
+    $rethinkdb_bin --config-file "$rethinkdb_conf_file" --log-file "$rethinkdb_log_file" --pid-file "$rethinkdb_pid_file" --daemon
 }
 
 stop () {
@@ -68,11 +72,11 @@ stop () {
 
 status () {
     if [ -e "$rethinkdb_pid_file" ] ; then
-        rethinkdb_pid="`cat "$rtdbpidfile"`"
+        rethinkdb_pid="`cat "$rethinkdb_pid_file"`"
         if ! is_running "$rethinkdb_pid"; then
             echo "rethinkdb: stop/crashed"
         else
-            echo "rethinkdb: start/running, pid `cat "$rtdbpidfile"`"
+            echo "rethinkdb: start/running, pid `cat "$rethinkdb_pid_file"`"
         fi
     else
         echo "rethinkdb: stop/waiting"
@@ -155,9 +159,38 @@ default_cluster_port=29015
 default_http_port=8080
 default_port_offset=0
 
+upgrade_config () {
+    set -- "$rethinkdb_conf_dir"/instances.d/*.conf
+    if [ "$1" == "$rethinkdb_conf_dir/instances.d/*.conf" ]; then
+        echo "rethinkdb: No instances defined. Removing \`$rethinkdb_conf_dir/instances.d'"
+        rmdir "$rethinkdb_conf_dir/instances.d"
+        exit
+    fi
+    if [ $# != 1 ]; then
+        echo "rethinkdb: Refusing to upgrade: multiple instances are defined."
+        echo "rethinkdb: Remove all but one of the conf files in \`$rethinkdb_conf_dir/instances.d' before upgrading."
+        exit 1
+    fi
+    if ! conf_read "$1" conf; then
+        echo "rethinkdb: Could not parse configuration file \`$1'."
+        exit 1
+    fi
+    if ! get "$conf" pid-file rtdbpidfile; then
+        echo "rethinkdb: Cannot upgrade: \`$1' uses a custom pid-file"
+    fi
+    if ! get "$conf" log-file rtdblogfile; then
+        echo "rethinkdb: Cannot upgrade: \`$1' uses a custom log-file"
+    fi
+    # TODO
+}
+
 case "$itask" in
     start|stop|restart|force-restart|status)
         true
+        ;;
+    upgrade-config)
+        upgrade_config
+        exit
         ;;
     "")
         usage_fail
@@ -281,7 +314,7 @@ do
             fi
             if ! get "$conf" log-file rtdblogfile; then
                 rtdblogfile=$rtdb_directory/log_file
-            fi    
+            fi
             echo "rethinkdb: $instance_name: Starting instance. (logging to \`$rtdblogfile')"
             "$rethinkdb_bin" --daemon "$@"
         fi
