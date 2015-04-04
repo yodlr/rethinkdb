@@ -98,6 +98,9 @@ esac
 
 else ############## Deprecated pre-2.1 config ##############
 
+rtdbconfigdir="$rethinkdb_conf_dir"
+rtdbbin="$rethinkdb_bin"
+
 itask="${1:-}"
 
 # parse a line from the config file
@@ -181,7 +184,16 @@ upgrade_config () {
     if ! get "$conf" log-file rtdblogfile; then
         echo "rethinkdb: Cannot upgrade: \`$1' uses a custom log-file"
     fi
-    # TODO
+    if [ -e "$rethinkdb_conf_file" ]; then
+        echo "rethinkdb: Backing up \`$rethinkdb_conf_file' to \`$rethinkdb_conf_file.old'"
+        mv -i "$rethinkdb_conf_file" "$rethinkdb_conf_file.old"
+    fi
+    echo "rethinkdb: Moving \`$1' to \`$rethinkdb_conf_file'"
+    mv -i "$1" "$rethinkdb_conf_file"
+    if ! rmdir "$rethinkdb_conf_dir"/instances.d; then
+        echo "rethinkdb: Could not remove \`$rethinkdb_conf_dir/instances.d', moving to \`"$rethinkdb_conf_dir"/instances.d.backup'"
+        mv -i "$rethinkdb_conf_dir"/instances.d "$rethinkdb_conf_dir"/instances.d.backup
+    fi
 }
 
 case "$itask" in
@@ -202,13 +214,13 @@ case "$itask" in
 esac
 
 # We check for active configurations .
-if ! ls "$rethinkdb_conf_dir"/instances.d/*.conf >/dev/null 2>/dev/null ; then
-    echo "rethinkdb: No instances defined in $rethinkdb_conf_dir/instances.d/"
+if ! ls "$rtdbconfigdir"/instances.d/*.conf >/dev/null 2>/dev/null ; then
+    echo "rethinkdb: No instances defined in $rtdbconfigdir/instances.d/"
     echo "rethinkdb: See http://www.rethinkdb.com/docs/guides/startup/ for more information" ;
     exit
 fi
 
-for rtdbconffile in "$rethinkdb_conf_dir"/instances.d/*.conf ;
+for rtdbconffile in "$rtdbconfigdir"/instances.d/*.conf ;
 do
 
     echo "rethinkdb: warning: using a deprecated config file '$rtdbconffile'. Run \`$0 upgrade-config' to upgrade." >&2
@@ -316,7 +328,7 @@ do
                 rtdblogfile=$rtdb_directory/log_file
             fi
             echo "rethinkdb: $instance_name: Starting instance. (logging to \`$rtdblogfile')"
-            "$rethinkdb_bin" --daemon "$@"
+            "$rtdbbin" --daemon "$@"
         fi
     fi
 
