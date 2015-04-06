@@ -121,31 +121,25 @@ describe('Javascript connection API', function(){
         
         // TODO: test default port
         
-        it("close twice and reconnect", withConnection(function(done, c){
+        it("close twice (noreplyWait=false) and reconnect", withConnection(function(done, c) {
             testSimpleQuery(c, function(){
-                assert.doesNotThrow(function(){
-                    c.close({noreplyWait: false});
-                    c.close({noreplyWait: false});
-                    c.reconnect(function(err, c){
-                        assertNull(err);
-                        testSimpleQuery(c, done);
-                    });
-                });
-            });
-        }));
+                assert.doesNotThrow(function() {
+                    c.close({noreplyWait: false}).then(function() {
+                        c.close({noreplyWait: false}).then(function() {
+                            c.reconnect(function(err, c){
+                                assertNull(err);
+                                testSimpleQuery(c, done);
+        }); }); }); }); }); }));
         
-        it("close twice (synchronously) and reconnect", withConnection(function(done, c){
+        it("close twice (synchronously) and reconnect", withConnection(function(done, c) {
             testSimpleQuery(c, function(){
-                assert.doesNotThrow(function(){
-                    c.close();
-                    c.close();
-                    c.reconnect(function(err, c){
-                        assertNull(err);
-                        testSimpleQuery(c, done);
-                    });
-                });
-            });
-        }));
+                assert.doesNotThrow(function() {
+                    c.close().then(function() {
+                        c.close().then(function() {
+                            c.reconnect(function(err, c){
+                                assertNull(err);
+                                testSimpleQuery(c, done);
+        }); }); }); }); }); }));
         
         it("fails to query after close", withConnection(function(done, c){
             c.close({noreplyWait: false});
@@ -218,17 +212,6 @@ describe('Javascript connection API', function(){
                 done()
             });
         }));
-        
-        it("test use", withConnection(function(done, c){
-            r.db('test').tableCreate('t1').run(c, noError(function(){
-                r.dbCreate('db2').run(c, noError(function(){
-                    r.db('db2').tableCreate('t2').run(c, noError(function(){
-                        c.use('db2');
-                        r.table('t2').run(c, noError(function(){
-                            c.use('test');
-                            r.table('t2').run(c, givesError("RqlRuntimeError", "Table `test.t2` does not exist",
-                                                            done));
-        }));}));}));}));}));
         
         it("useOutdated", withConnection(function(done, c){
             r.db('test').tableCreate('useOutdated').run(c, function(){
@@ -338,7 +321,7 @@ describe('Javascript connection API', function(){
                             assertNull(e);
                             r.expr(1).run(c, noError(done));
                             // undo the auth_key
-                            r.db('rethinkdb').table('cluster_config').update({auth_key: null}).run(c, assertNull);
+                            r.db('rethinkdb').table('cluster_config').update({auth_key:null}).run(c, assertNull);
                         });
                     }));
                 });
@@ -352,11 +335,25 @@ describe('Javascript connection API', function(){
                     r.db('rethinkdb').table('cluster_config').update({auth_key: "hunter4"}).run(c, noError(function() {
                         r.connect({host:serverHost, port:driverPort, authKey: "hunter-wrong"}, givesError("RqlDriverError", "Server dropped connection with message: \"ERROR: Incorrect authorization key.\"", done));
                         // undo the auth_key
-                        r.db('rethinkdb').table('cluster_config').update({auth_key: "hunter3"}).run(c, assertNull);
+                        r.db('rethinkdb').table('cluster_config').update({auth_key:null}).run(c, assertNull);
                     }));
                 });
             }, 500);
         });
+        
+        // -- use tests
+        
+        this.timeout(8000) // "test use" can take soem time
+        
+        it("test use", withConnection(function(done, c){
+            r.db('test').tableCreate('t1').run(c, noError(function(){
+                r.dbCreate('db2').run(c, noError(function(){
+                    r.db('db2').tableCreate('t2').run(c, noError(function(){
+                        c.use('db2');
+                        r.table('t2').run(c, noError(function(){
+                            c.use('test');
+                            r.table('t2').run(c, givesError("RqlRuntimeError", "Table `test.t2` does not exist", done));
+        }));}));}));}));}));
     });
 });
 
