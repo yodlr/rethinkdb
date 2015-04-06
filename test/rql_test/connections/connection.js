@@ -52,14 +52,6 @@ var withConnection = function(f){
     };
 };
 
-var testSimpleQuery = function(c, done){
-    r(1).run(c, function(err, res){
-        assertNull(err);
-        assert.equal(res, 1);
-        done();
-    });
-};
-
 var noError = function(f){
     return function(err){
         assertNull(err);
@@ -121,25 +113,41 @@ describe('Javascript connection API', function(){
         
         // TODO: test default port
         
-        it("close twice (noreplyWait=false) and reconnect", withConnection(function(done, c) {
-            testSimpleQuery(c, function(){
-                assert.doesNotThrow(function() {
-                    c.close({noreplyWait: false}).then(function() {
-                        c.close({noreplyWait: false}).then(function() {
-                            c.reconnect(function(err, c){
-                                assertNull(err);
-                                testSimpleQuery(c, done);
-        }); }); }); }); }); }));
-        
-        it("close twice (synchronously) and reconnect", withConnection(function(done, c) {
-            testSimpleQuery(c, function(){
-                assert.doesNotThrow(function() {
-                    c.close().then(function() {
-                        c.close().then(function() {
-                            c.reconnect(function(err, c){
-                                assertNull(err);
-                                testSimpleQuery(c, done);
-        }); }); }); }); }); }));
+        describe('close twice and reconnect', function(){
+            simpleQuery = function(c) { return r(1).run(c); };
+            
+            it("noreplyWait=false", function(done) {
+                var conn = null;
+                r.connect({host:serverHost, port:driverPort}).then(function(c) {
+                    conn = c;
+                    return simpleQuery(conn);
+                }).then(function() {
+                    return conn.close({noreplyWait: false});
+                }).then(function() {
+                    return conn.close({noreplyWait: false});
+                }).then(function() {
+                    return conn.reconnect();
+                }).then(function() {
+                    return simpleQuery(conn);
+                }).then(done)
+            });
+            
+            it("synchronously", function(done) {
+                var conn = null;
+                r.connect({host:serverHost, port:driverPort}).then(function(c) {
+                    conn = c;
+                    return simpleQuery(conn);
+                }).then(function() {
+                    return conn.close();
+                }).then(function() {
+                    return conn.close();
+                }).then(function() {
+                    return conn.reconnect();
+                }).then(function() {
+                    return simpleQuery(conn);
+                }).then(done)
+            });
+        })
         
         it("fails to query after close", withConnection(function(done, c){
             c.close({noreplyWait: false});
