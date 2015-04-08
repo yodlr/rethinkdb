@@ -120,7 +120,7 @@ describe('Javascript connection API', function(){
         // TODO: test default port
         
         describe('close twice and reconnect', function(){
-            simpleQuery = function(c) { return r(1).run(c); };
+            var simpleQuery = function(c) { return r(1).run(c); };
             
             it("noreplyWait=false", function(done) {
                 var conn = null;
