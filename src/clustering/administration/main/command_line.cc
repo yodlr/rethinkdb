@@ -98,7 +98,7 @@ int open_pid_file(const std::string &pid_filepath, FILE **pid_file_handle){
 
     *pid_file_handle = fopen(pid_filepath.c_str(), "w");
 
-    return *pid_file_handle == NULL ? EXIT_SUCCESS : EXIT_FAILURE;
+    return *pid_file_handle != NULL ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 int write_pid_file(FILE* pid_file_handle) {
@@ -307,7 +307,10 @@ void get_and_set_user_group_and_directory(
     directory_lock->change_ownership(group_id, group_name, user_id, user_name);
     if (pid_file_handle != NULL) {
         if (user_id != INVALID_UID || group_id != INVALID_GID) {
-            fchown(fileno(pid_file_handle), user_id, group_id);
+            if (fchown(fileno(pid_file_handle), user_id, group_id) != 0) {
+                throw std::runtime_error(strprintf("Failed to change ownership of pid-file: %s",
+                                                   errno_string(get_errno()).c_str()));
+            }
         }
     }
     set_user_group(group_id, group_name, user_id, user_name);
@@ -1690,14 +1693,14 @@ int main_rethinkdb_porcelain(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
 
+        base_path.make_absolute();
+        initialize_logfile(opts, base_path);
+
         if (is_new_directory) {
             get_and_set_user_group_and_directory(opts, &data_directory_lock, pid_file_handle);
         } else {
             get_and_set_user_group(opts);
         }
-
-        base_path.make_absolute();
-        initialize_logfile(opts, base_path);
 
         recreate_temporary_directory(base_path);
 

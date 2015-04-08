@@ -37,7 +37,7 @@ if [ ! -d "$rethinkdb_conf_dir/instances.d" ]; then # Post-2.1 config
 start () {
     if [ -e "$rethinkdb_pid_file" ]; then
         if is_running "`cat "$rethinkdb_pid_file"`"; then
-            echo "rethinkdb: $instance_name: The instance has already started"
+            echo "rethinkdb: The server has already started"
         else
             rm "$rethinkdb_pid_file"
         fi

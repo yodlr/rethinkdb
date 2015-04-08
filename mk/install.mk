@@ -43,7 +43,6 @@ share_dir := $(prefix)/share/$(VERSIONED_PACKAGE_NAME)
 scripts_dir := $(share_dir)/scripts
 init_dir := $(etc_dir)/init.d
 conf_dir := $(etc_dir)/rethinkdb
-conf_instance_dir := $(conf_dir)/instances.d
 lib_dir := $(prefix)/lib/rethinkdb
 pidfile_dir := $(var_dir)/run/rethinkdb
 data_dir := $(var_dir)/lib/rethinkdb
@@ -96,10 +95,9 @@ install-init:
 
 .PHONY: install-config
 install-config:
-	$P INSTALL $(DESTDIR)$(conf_dir)/default.conf.sample
+	$P INSTALL $(DESTDIR)$(conf_dir)/server.conf
 	umask 022 && install -m755 -d $(DESTDIR)$(conf_dir)
-	umask 022 && install -m755 -d $(DESTDIR)$(conf_instance_dir)
-	install -m644 $(ASSETS_DIR)/config/default.conf.sample $(DESTDIR)$(conf_dir)/default.conf.sample
+	install -m644 $(ASSETS_DIR)/config/server.conf $(DESTDIR)$(conf_dir)/server.conf
 
 .PHONY: install-data
 install-data:

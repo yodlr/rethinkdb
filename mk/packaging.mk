@@ -25,7 +25,7 @@ prepare_deb_package_dirs:
 	mkdir -p $(DEB_PACKAGE_DIR)
 	mkdir -p $(DEB_CONTROL_ROOT)
 
-DIST_SUPPORT_PACKAGES := re2 gtest handlebars v8
+DIST_SUPPORT_PACKAGES := re2 gtest v8
 DIST_CUSTOM_MK_LINES :=
 ifeq ($(BUILD_PORTABLE),1)
   DIST_SUPPORT_PACKAGES += protobuf jemalloc boost icu
@@ -97,7 +97,7 @@ deb-src-dir: dist-dir
 .PHONY: build-deb
 build-deb: deb-src-dir
 	$P BUILD-DEB $(DSC_PACKAGE_DIR)
-	cd $(DSC_PACKAGE_DIR) && dpkg-buildpackage -rfakeroot $(DEBUILD_SIGN_OPTIONS)
+	cd $(DSC_PACKAGE_DIR) && debuild $(DEBUILD_SIGN_OPTIONS) $(DEBUILD_OPTS)
 
 .PHONY: install-osx
 install-osx: install-binaries
