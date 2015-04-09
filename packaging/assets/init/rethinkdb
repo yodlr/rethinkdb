@@ -50,7 +50,13 @@ start () {
     fi
     echo "rethinkdb: Starting server. (logging to \`$rethinkdb_log_file')"
     cd /var/lib/rethinkdb
-    $rethinkdb_bin --config-file "$rethinkdb_conf_file" --log-file "$rethinkdb_log_file" --pid-file "$rethinkdb_pid_file" --runuser "$rethinkdb_runuser" --rungroup "$rethinkdb_rungrop" --daemon
+    $rethinkdb_bin \
+        --config-file "$rethinkdb_conf_file" \
+        --log-file "$rethinkdb_log_file" \
+        --pid-file "$rethinkdb_pid_file" \
+        --runuser "$rethinkdb_runuser" \
+        --rungroup "$rethinkdb_rungrop" \
+        --daemon
 }
 
 stop () {
