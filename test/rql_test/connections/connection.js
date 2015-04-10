@@ -19,34 +19,27 @@ var serverHost = process.env.RDB_SERVER_HOST || 'localhost';
 
 // -- helper functions
 
-var assertErr = function(err, type, msg) {
-    assertNotNull(err);
-    assert.equal(err.constructor.name, type);
-    var _msg = err.message.replace(/ in:\n([\r\n]|.)*/m, "");
-    _msg = _msg.replace(/\nFailed assertion:(.|\n)*/m, "")
-    assert.equal(_msg, msg);
-};
-
 var givesError = function(type, msg, done){
     return function(err){
         var error = null;
-        try { assertErr(err, type, msg); }
-        catch (e) { error = e }
-        finally {
+        try {
+            assertNotNull(err);
+            assert.equal(err.constructor.name, type);
+            var _msg = err.message.replace(/ in:\n([\r\n]|.)*/m, "");
+            _msg = _msg.replace(/\nFailed assertion:(.|\n)*/m, "")
+            assert.equal(_msg, msg);
+        } catch (e) {
+            error = e;
+        } finally {
             if (done) {
                 done(error);
-            } else {
+            } else if (error) {
                 throw error;
+            } else {
+                return true; // error is correct
             }
         }
     };
-};
-
-var checkError = function(type, msg) {
-    return function(err) {
-      assertErr(err, type, msg);
-      return true; // error is correct
-    }
 };
 
 var withConnection = function(f){
@@ -356,28 +349,18 @@ describe('Javascript connection API', function(){
                     return r.connect({host:serverHost, port:driverPort, authKey: "hunter3"});
                 }).then(function(authConn) {
                     return r.expr(1).run(authConn);
-                }).nodeify(function(err) {
-                    done(err);
-                })
+                }).nodeify(done)
             });
             
             it("wrong authorization key", function(done){
                 this.timeout(500);
-                var error = null;
                 r.db('rethinkdb').table('cluster_config').update({auth_key: "hunter4"}).run(safeConn)
                 .then(function() {
                     return r.connect({host:serverHost, port:driverPort, authKey: "hunter-bad"});
-                }).nodeify(function(err) {
-                    if (err) {
-                        try {
-                            assertErr(err, "RqlDriverError", "Server dropped connection with message: \"ERROR: Incorrect authorization key.\"");
-                            err = null; // so we report sucess
-                        } catch(e) {err = e; }
-                    } else {
-                        err = new Error('Unexpectedly connected with bad AuthKey');
-                    }
+                }).then(function() {
+                    err = new Error('Unexpectedly connected with bad AuthKey');
                     done(err);
-                })
+                }).catch(givesError("RqlDriverError", "Server dropped connection with message: \"ERROR: Incorrect authorization key.\"", done))
             });
         });
         
