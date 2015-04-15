@@ -17,7 +17,7 @@ var serverHost = process.env.RDB_SERVER_HOST || 'localhost';
 
 /// -- global variables
 
-var sharedConection = null;
+var sharedConnection = null;
 
 // -- helper functions
 
@@ -46,13 +46,13 @@ var givesError = function(type, msg, done){
 
 var withConnection = function(f){
     return function(done){
-        if (sharedConection) {
-            f(done, sharedConection);
+        if (sharedConnection) {
+            f(done, sharedConnection);
         } else {
             r.connect({host:serverHost, port:driverPort}, function(err, conn){
-                sharedConection = conn;
+                sharedConnection = conn;
                 assert.equal(err, null);
-                f(done, sharedConection);
+                f(done, sharedConnection);
             });
         }
     };
