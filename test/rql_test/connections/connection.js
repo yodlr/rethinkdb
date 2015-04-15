@@ -15,6 +15,10 @@ var testDefault = process.env.TEST_DEFAULT_PORT == "1";
 var driverPort = process.env.RDB_DRIVER_PORT || 28015;
 var serverHost = process.env.RDB_SERVER_HOST || 'localhost';
 
+/// -- global variables
+
+var sharedConection = null;
+
 // -- helper functions
 
 var givesError = function(type, msg, done){
@@ -40,13 +44,17 @@ var givesError = function(type, msg, done){
     };
 };
 
-var sharedConection = null;
 var withConnection = function(f){
     return function(done){
-        r.connect({host:serverHost, port:driverPort}, function(err, c){
-            assertNull(err);
-            f(done, c);
-        });
+        if (sharedConection) {
+            f(done, sharedConection);
+        } else {
+            r.connect({host:serverHost, port:driverPort}, function(err, conn){
+                sharedConection = conn;
+                assert.equal(err, null);
+                f(done, sharedConection);
+            });
+        }
     };
 };
 
