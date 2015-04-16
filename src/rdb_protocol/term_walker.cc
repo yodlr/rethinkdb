@@ -31,7 +31,7 @@ public:
     public:
         frame_t(intrusive_list_t<frame_t> *_parent_list,
                 Term::TermType _term_type,
-                bool is_stream_funcall,
+                bool is_zeroth_argument,
                 datum_t _val) :
             parent_list(_parent_list), term_type(_term_type),
             val(_val), writes_legal(true)
@@ -39,7 +39,7 @@ public:
             frame_t *prev_frame = parent_list->tail();
             if (prev_frame != nullptr) {
                 writes_legal = prev_frame->writes_legal &&
-                    (is_stream_funcall || !term_forbids_writes(prev_frame->term_type));
+                    (is_zeroth_argument || !term_forbids_writes(prev_frame->term_type));
             }
             parent_list->push_back(this);
         }
