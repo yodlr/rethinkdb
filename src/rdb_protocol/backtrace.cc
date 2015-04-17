@@ -4,11 +4,57 @@
 
 namespace ql {
 
+backtrace_patch_t::backtrace_patch_t(backtrace_id_t _parent_bt,
+                                     backtrace_registry_t *_bt_reg) :
+        bt_reg(_bt_reg), parent_bt(_parent_bt) {
+    guarantee(bt_reg != nullptr);
+}
+
+backtrace_patch_t::~backtrace_patch_t() { }
+
+bool backtrace_patch_t::get_patch(const Term *t, backtrace_id_t *bt_out) const {
+    auto const &it = patches.find(t);
+    if (it != patches.end()) {
+        *bt_out = it->second;
+    }
+    return it != patches.end();
+}
+
+void backtrace_patch_t::add_patch(const Term *t, const datum_t &val) {
+    backtrace_id_t bt = bt_reg->new_frame(parent_bt, t, val);
+    patches[t] = bt;
+}
+
+backtrace_patch_scope_t::backtrace_patch_scope_t(backtrace_registry_t *_bt_reg,
+                                                 const backtrace_patch_t *_patch) :
+        bt_reg(_bt_reg), patch(const_cast<backtrace_patch_t *>(_patch)) {
+    bt_reg->patches.push_back(patch);
+}
+
+backtrace_patch_scope_t::~backtrace_patch_scope_t() {
+    bt_reg->patches.remove(patch);
+}
+
 const datum_t backtrace_registry_t::EMPTY_BACKTRACE = datum_t::empty_array();
 
+bool backtrace_registry_t::check_for_patch(const Term *t,
+                                           backtrace_id_t *bt_out) const {
+    for (auto p = patches.head(); p != nullptr; p = patches.next(p)) {
+        if (p->get_patch(t, bt_out)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 backtrace_id_t dummy_backtrace_registry_t::new_frame(backtrace_id_t,
+                                                     const Term *t,
                                                      const datum_t &) {
-    return original_bt;
+    backtrace_id_t res;
+    if (!check_for_patch(t, &res)) {
+        res = original_bt;
+    }
+    return res;
 }
 
 real_backtrace_registry_t::frame_t::frame_t(backtrace_id_t _parent, datum_t _val) :
@@ -23,9 +69,14 @@ real_backtrace_registry_t::real_backtrace_registry_t() {
 }
 
 backtrace_id_t real_backtrace_registry_t::new_frame(backtrace_id_t parent_bt,
+                                                    const Term *t,
                                                     const datum_t &val) {
-    frames.emplace_back(parent_bt, val);
-    return frames.size() - 1;
+    backtrace_id_t res;
+    if (!check_for_patch(t, &res)) {
+        frames.emplace_back(parent_bt, val);
+        res = backtrace_id_t(frames.size() - 1);
+    }
+    return res;
 }
 
 datum_t real_backtrace_registry_t::datum_backtrace(const exc_t &ex) const {

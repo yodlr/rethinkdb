@@ -5,6 +5,7 @@
 #include <functional>
 
 #include "containers/counted.hpp"
+#include "rdb_protocol/backtrace.hpp"
 #include "rdb_protocol/counted_term.hpp"
 #include "rdb_protocol/op.hpp"
 #include "rdb_protocol/pb_utils.hpp"
@@ -21,7 +22,8 @@ enum poly_type_t {
 
 class obj_or_seq_op_impl_t {
 public:
-    obj_or_seq_op_impl_t(const term_t *self,
+    obj_or_seq_op_impl_t(compile_env_t *env,
+                         const term_t *self,
                          poly_type_t _poly_type,
                          protob_t<const Term> term,
                          std::set<std::string> &&_acceptable_ptypes);
@@ -36,6 +38,7 @@ private:
     protob_t<Term> func;
     const term_t *parent;
     const std::set<std::string> acceptable_ptypes;
+    backtrace_patch_t bt_patch;
 
     DISABLE_COPYING(obj_or_seq_op_impl_t);
 };

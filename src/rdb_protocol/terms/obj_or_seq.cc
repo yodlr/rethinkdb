@@ -18,10 +18,11 @@
 namespace ql {
 
 obj_or_seq_op_impl_t::obj_or_seq_op_impl_t(
-        const term_t *self, poly_type_t _poly_type, protob_t<const Term> term,
-        std::set<std::string> &&_acceptable_ptypes)
+        compile_env_t *env, const term_t *self, poly_type_t _poly_type,
+        protob_t<const Term> term, std::set<std::string> &&_acceptable_ptypes)
     : poly_type(_poly_type), func(make_counted_term()), parent(self),
-      acceptable_ptypes(std::move(_acceptable_ptypes)) {
+      acceptable_ptypes(std::move(_acceptable_ptypes)),
+      bt_patch(self->backtrace(), env->bt_reg) {
     auto varnum = pb::dummy_var_t::OBJORSEQ_VARNUM;
 
     // TODO: RSI: preserve backtraces from the original terms
@@ -29,7 +30,7 @@ obj_or_seq_op_impl_t::obj_or_seq_op_impl_t(
     // is replaced by a new variable.
     // For example, foo.pluck('a') becomes varnum.pluck('a')
     r::reql_t body = r::var(varnum).call(term->type());
-    body.copy_args_from_term(*term, 1);
+    body.copy_args_from_term(*term, 1, &bt_patch);
     body.add_arg(r::optarg("_NO_RECURSE_", r::boolean(true)));
 
     switch (poly_type) {
@@ -89,6 +90,8 @@ scoped_ptr_t<val_t> obj_or_seq_op_impl_t::eval_impl_dereferenced(
 
         dummy_backtrace_registry_t dummy_reg(target->backtrace());
         compile_env_t compile_env(env->scope.compute_visibility(), &dummy_reg);
+        backtrace_patch_scope_t bt_scope(&dummy_reg, &bt_patch);
+
         counted_t<func_term_t> func_term
             = make_counted<func_term_t>(&compile_env, func, target->backtrace());
         counted_t<const func_t> f = func_term->eval_to_func(env->scope);
@@ -122,14 +125,14 @@ obj_or_seq_op_term_t::obj_or_seq_op_term_t(
         compile_env_t *env, const protob_t<const Term> term, backtrace_id_t bt,
         poly_type_t _poly_type, argspec_t argspec)
     : grouped_seq_op_term_t(env, term, bt, argspec, optargspec_t({"_NO_RECURSE_"})),
-      impl(this, _poly_type, term, std::set<std::string>()) {
+      impl(env, this, _poly_type, term, std::set<std::string>()) {
 }
 
 obj_or_seq_op_term_t::obj_or_seq_op_term_t(
         compile_env_t *env, protob_t<const Term> term, backtrace_id_t bt,
         poly_type_t _poly_type, argspec_t argspec, std::set<std::string> &&ptypes)
     : grouped_seq_op_term_t(env, term, bt, argspec, optargspec_t({"_NO_RECURSE_"})),
-      impl(this, _poly_type, term, std::move(ptypes)) {
+      impl(env, this, _poly_type, term, std::move(ptypes)) {
 }
 
 scoped_ptr_t<val_t> obj_or_seq_op_term_t::eval_impl(scope_env_t *env, args_t *args,
@@ -318,7 +321,7 @@ public:
                    backtrace_id_t bt)
         : grouped_seq_op_term_t(env, term, bt, argspec_t(2),
                                 optargspec_t({"_NO_RECURSE_"})),
-          impl(this, SKIP_MAP, term, std::set<std::string>()) {}
+          impl(env, this, SKIP_MAP, term, std::set<std::string>()) {}
 private:
     scoped_ptr_t<val_t> obj_eval_dereferenced(
         const scoped_ptr_t<val_t> &v0, const scoped_ptr_t<val_t> &v1) const {

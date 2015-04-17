@@ -71,8 +71,10 @@ public:
         for (int i = 0; i < term->optargs_size(); ++i) {
             const Term_AssocPair *pair = &term->optargs(i);
             backtrace_id_t child_bt =
-                env->bt_reg->new_frame(backtrace(), datum_t(pair->key().c_str()));
-            counted_t<const term_t> t = compile_term(env, term.make_child(&pair->val()), child_bt);
+                env->bt_reg->new_frame(backtrace(), term.get(),
+                                       datum_t(pair->key().c_str()));
+            counted_t<const term_t> t =
+                compile_term(env, term.make_child(&pair->val()), child_bt);
             auto res = optargs.insert(std::make_pair(pair->key(), std::move(t)));
             rcheck(res.second,
                    base_exc_t::GENERIC,

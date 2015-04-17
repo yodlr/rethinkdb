@@ -172,7 +172,7 @@ op_term_t::op_term_t(compile_env_t *env, const protob_t<const Term> term,
     original_args.reserve(term->args_size());
     for (int i = 0; i < term->args_size(); ++i) {
         backtrace_id_t child_bt =
-            env->bt_reg->new_frame(bt, datum_t(static_cast<double>(i)));
+            env->bt_reg->new_frame(bt, term.get(), datum_t(static_cast<double>(i)));
         counted_t<const term_t> t
             = compile_term(env, term.make_child(&term->args(i)), child_bt);
         original_args.push_back(t);
@@ -183,7 +183,7 @@ op_term_t::op_term_t(compile_env_t *env, const protob_t<const Term> term,
     for (int i = 0; i < term->optargs_size(); ++i) {
         const Term_AssocPair *ap = &term->optargs(i);
         backtrace_id_t child_bt =
-            env->bt_reg->new_frame(bt, datum_t(ap->key().c_str()));
+            env->bt_reg->new_frame(bt, term.get(), datum_t(ap->key().c_str()));
         rcheck_src(child_bt, optargspec.contains(ap->key()),
                    base_exc_t::GENERIC,
                    strprintf("Unrecognized optional argument `%s`.",

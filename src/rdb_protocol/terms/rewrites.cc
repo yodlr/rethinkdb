@@ -11,43 +11,26 @@
 
 namespace ql {
 
-class backtrace_replacer_t {
-public:
-    backtrace_replacer_t(backtrace_id_t bt,
-                         compile_env_t *_env) :
-            env(_env),
-            original_bt_reg(env->bt_reg),
-            dummy_reg(bt) {
-        env->bt_reg = &dummy_reg;
-    }
-
-    ~backtrace_replacer_t() {
-        env->bt_reg = original_bt_reg;
-    }
-
-private:
-    compile_env_t *env;
-    backtrace_registry_t *original_bt_reg;
-    dummy_backtrace_registry_t dummy_reg;
-};
-
 // This file implements terms that are rewritten into other terms.
 
 class rewrite_term_t : public term_t {
 public:
     rewrite_term_t(compile_env_t *env, const protob_t<const Term> term,
                    backtrace_id_t bt, argspec_t argspec,
-                   r::reql_t (*rewrite)(protob_t<const Term> in,
+                   r::reql_t (*rewrite)(backtrace_patch_t *bt_patch,
+                                        protob_t<const Term> in,
                                         protob_t<const Term> optargs_in))
-        : term_t(term, bt), in(term), out(make_counted_term()) {
+            : term_t(term, bt), in(term), out(make_counted_term()) {
+        backtrace_patch_t bt_patch(backtrace(), env->bt_reg);
+        backtrace_patch_scope_t bt_scope(env->bt_reg, &bt_patch);
+
         int args_size = in->args_size();
         rcheck(argspec.contains(args_size),
                base_exc_t::GENERIC,
                strprintf("Expected %s but found %d.",
                          argspec.print().c_str(), args_size));
-        out->Swap(&rewrite(in, in).get());
+        out->Swap(&rewrite(&bt_patch, in, in).get());
 
-        backtrace_replacer_t bt_replacer(bt, env);
         real = compile_term(env, out, bt);
     }
 
@@ -75,7 +58,8 @@ public:
                       backtrace_id_t bt)
         : rewrite_term_t(env, term, bt, argspec_t(3), rewrite) { }
 
-    static r::reql_t rewrite(protob_t<const Term> in,
+    static r::reql_t rewrite(backtrace_patch_t *bt_patch,
+                             protob_t<const Term> in,
                              protob_t<const Term> optargs_in) {
         const Term &left = in->args(0);
         const Term &right = in->args(1);
@@ -94,7 +78,7 @@ public:
                                         r::optarg("left", n), r::optarg("right", m))),
                                 r::array())))));
 
-        term.copy_optargs_from_term(*optargs_in);
+        term.copy_optargs_from_term(*optargs_in, bt_patch);
         return term;
     }
 
@@ -107,7 +91,8 @@ public:
                       backtrace_id_t bt) :
         rewrite_term_t(env, term, bt, argspec_t(3), rewrite) { }
 
-    static r::reql_t rewrite(protob_t<const Term> in,
+    static r::reql_t rewrite(backtrace_patch_t *bt_patch,
+                             protob_t<const Term> in,
                              protob_t<const Term> optargs_in) {
         const Term &left = in->args(0);
         const Term &right = in->args(1);
@@ -133,7 +118,7 @@ public:
                             lst,
                             r::array(r::object(r::optarg("left", n)))))));
 
-        term.copy_optargs_from_term(*optargs_in);
+        term.copy_optargs_from_term(*optargs_in, bt_patch);
         return term;
     }
 
@@ -147,7 +132,8 @@ public:
         rewrite_term_t(env, term, bt, argspec_t(3), rewrite) { }
 private:
 
-    static r::reql_t rewrite(protob_t<const Term> in,
+    static r::reql_t rewrite(backtrace_patch_t *bt_patch,
+                             protob_t<const Term> in,
                              protob_t<const Term> optargs_in) {
         const Term &left = in->args(0);
         const Term &left_attr = in->args(1);
@@ -159,7 +145,7 @@ private:
         r::reql_t get_all =
             r::expr(right).get_all(
                 r::expr(left_attr)(row, r::optarg("_SHORTCUT_", GET_FIELD_SHORTCUT)));
-        get_all.copy_optargs_from_term(*optargs_in);
+        get_all.copy_optargs_from_term(*optargs_in, bt_patch);
         return r::expr(left).concat_map(
             r::fun(row,
                    r::branch(
@@ -180,13 +166,14 @@ public:
         : rewrite_term_t(env, term, bt, argspec_t(1), rewrite) { }
 private:
 
-    static r::reql_t rewrite(protob_t<const Term> in,
+    static r::reql_t rewrite(backtrace_patch_t *bt_patch,
+                             protob_t<const Term> in,
                              protob_t<const Term> optargs_in) {
         auto x = pb::dummy_var_t::IGNORED;
 
         r::reql_t term = r::expr(in->args(0)).replace(r::fun(x, r::null()));
 
-        term.copy_optargs_from_term(*optargs_in);
+        term.copy_optargs_from_term(*optargs_in, bt_patch);
         return term;
      }
      virtual const char *name() const { return "delete"; }
@@ -198,7 +185,8 @@ public:
                   backtrace_id_t bt)
         : rewrite_term_t(env, term, bt, argspec_t(2), rewrite) { }
 private:
-    static r::reql_t rewrite(protob_t<const Term> in,
+    static r::reql_t rewrite(backtrace_patch_t *bt_patch,
+                             protob_t<const Term> in,
                              protob_t<const Term> optargs_in) {
         auto old_row = pb::dummy_var_t::UPDATE_OLDROW;
         auto new_row = pb::dummy_var_t::UPDATE_NEWROW;
@@ -218,7 +206,7 @@ private:
                                         r::optarg("_EVAL_FLAGS_", LITERAL_OK)),
                                     r::optarg("_EVAL_FLAGS_", LITERAL_OK)))));
 
-        term.copy_optargs_from_term(*optargs_in);
+        term.copy_optargs_from_term(*optargs_in, bt_patch);
         return term;
     }
     virtual const char *name() const { return "update"; }
@@ -230,13 +218,14 @@ public:
                 backtrace_id_t bt)
         : rewrite_term_t(env, term, bt, argspec_t(2), rewrite) { }
 private:
-    static r::reql_t rewrite(protob_t<const Term> in,
+    static r::reql_t rewrite(backtrace_patch_t *bt_patch,
+                             protob_t<const Term> in,
                              protob_t<const Term> optargs_in) {
         r::reql_t term =
             r::expr(in->args(0)).slice(in->args(1), -1,
                 r::optarg("right_bound", "closed"));
 
-        term.copy_optargs_from_term(*optargs_in);
+        term.copy_optargs_from_term(*optargs_in, bt_patch);
         return term;
      }
      virtual const char *name() const { return "skip"; }
@@ -248,7 +237,8 @@ public:
                       backtrace_id_t bt)
         : rewrite_term_t(env, term, bt, argspec_t(2), rewrite) { }
 private:
-    static r::reql_t rewrite(protob_t<const Term> in,
+    static r::reql_t rewrite(backtrace_patch_t *bt_patch,
+                             protob_t<const Term> in,
                              protob_t<const Term> optargs_in) {
         auto row = pb::dummy_var_t::DIFFERENCE_ROW;
 
@@ -257,7 +247,7 @@ private:
                 r::fun(row,
                     !r::expr(in->args(1)).contains(row)));
 
-        term.copy_optargs_from_term(*optargs_in);
+        term.copy_optargs_from_term(*optargs_in, bt_patch);
         return term;
     }
 
@@ -270,15 +260,14 @@ public:
                        backtrace_id_t bt)
         : rewrite_term_t(env, term, bt, argspec_t(1, -1), rewrite) { }
 private:
-    static r::reql_t rewrite(protob_t<const Term> in,
+    static r::reql_t rewrite(backtrace_patch_t *bt_patch,
+                             protob_t<const Term> in,
                              protob_t<const Term> optargs_in) {
-
-        // TODO: RSI: preserve backtraces
         r::reql_t has_fields = r::expr(in->args(0)).has_fields();
-        has_fields.copy_args_from_term(*in, 1);
-        has_fields.copy_optargs_from_term(*optargs_in);
+        has_fields.copy_args_from_term(*in, 1, bt_patch);
+        has_fields.copy_optargs_from_term(*optargs_in, bt_patch);
         r::reql_t pluck = std::move(has_fields).pluck();
-        pluck.copy_args_from_term(*in, 1);
+        pluck.copy_args_from_term(*in, 1, bt_patch);
 
         return pluck;
     }
