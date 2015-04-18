@@ -338,8 +338,7 @@ counted_t<const func_t> new_constant_func(datum_t obj,
     protob_t<Term> twrap = r::fun(r::expr(obj)).release_counted();
 
     // The dummy registry will ensure all sub-terms use this backtrace
-    dummy_backtrace_registry_t dummy_reg(bt);
-    compile_env_t empty_compile_env((var_visibility_t()), &dummy_reg);
+    compile_env_t empty_compile_env((var_visibility_t()));
     counted_t<func_term_t> func_term = make_counted<func_term_t>(&empty_compile_env,
                                                                  twrap, bt);
     return func_term->eval_to_func(var_scope_t());
@@ -351,8 +350,7 @@ counted_t<const func_t> new_get_field_func(datum_t key,
     protob_t<Term> twrap = r::fun(obj, r::var(obj)[key]).release_counted();
 
     // The dummy registry will ensure all sub-terms use this backtrace
-    dummy_backtrace_registry_t dummy_reg(bt);
-    compile_env_t empty_compile_env((var_visibility_t()), &dummy_reg);
+    compile_env_t empty_compile_env((var_visibility_t()));
     counted_t<func_term_t> func_term = make_counted<func_term_t>(&empty_compile_env,
                                                                  twrap, bt);
     return func_term->eval_to_func(var_scope_t());
@@ -364,8 +362,7 @@ counted_t<const func_t> new_pluck_func(datum_t obj,
     protob_t<Term> twrap = r::fun(var, r::var(var).pluck(obj)).release_counted();
 
     // The dummy registry will ensure all sub-terms use this backtrace
-    dummy_backtrace_registry_t dummy_reg(bt);
-    compile_env_t empty_compile_env((var_visibility_t()), &dummy_reg);
+    compile_env_t empty_compile_env((var_visibility_t()));
     counted_t<func_term_t> func_term = make_counted<func_term_t>(&empty_compile_env,
                                                                  twrap, bt);
     return func_term->eval_to_func(var_scope_t());
@@ -377,8 +374,7 @@ counted_t<const func_t> new_eq_comparison_func(datum_t obj,
     protob_t<Term> twrap = r::fun(var, r::var(var) == obj).release_counted();
 
     // The dummy registry will ensure all sub-terms use this backtrace
-    dummy_backtrace_registry_t dummy_reg(bt);
-    compile_env_t empty_compile_env((var_visibility_t()), &dummy_reg);
+    compile_env_t empty_compile_env((var_visibility_t()));
     counted_t<func_term_t> func_term = make_counted<func_term_t>(&empty_compile_env,
                                                                  twrap, bt);
     return func_term->eval_to_func(var_scope_t());
@@ -397,8 +393,7 @@ counted_t<const func_t> new_page_func(datum_t method,
                 .release_counted();
 
             // The dummy registry will ensure all sub-terms use this backtrace
-            dummy_backtrace_registry_t dummy_reg(bt);
-            compile_env_t empty_compile_env((var_visibility_t()), &dummy_reg);
+            compile_env_t empty_compile_env((var_visibility_t()));
             counted_t<func_term_t> func_term =
                 make_counted<func_term_t>(&empty_compile_env, twrap, bt);
             return func_term->eval_to_func(var_scope_t());

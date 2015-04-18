@@ -26,9 +26,8 @@ namespace ql {
 class geo_term_t : public op_term_t {
 public:
     geo_term_t(compile_env_t *env, const protob_t<const Term> &term,
-               backtrace_id_t bt, const argspec_t &argspec,
-               optargspec_t optargspec = optargspec_t({}))
-        : op_term_t(env, term, bt, argspec, optargspec) { }
+               const argspec_t &argspec, optargspec_t optargspec = optargspec_t({}))
+        : op_term_t(env, term, argspec, optargspec) { }
 private:
     // With the exception of r.point(), all geo terms are non-deterministic
     // because they typically depend on floating point results that might
@@ -51,9 +50,8 @@ private:
 class geo_obj_or_seq_op_term_t : public obj_or_seq_op_term_t {
 public:
     geo_obj_or_seq_op_term_t(compile_env_t *env, protob_t<const Term> term,
-                             backtrace_id_t bt, poly_type_t _poly_type,
-                             argspec_t argspec)
-        : obj_or_seq_op_term_t(env, term, bt, _poly_type, argspec,
+                             poly_type_t _poly_type, argspec_t argspec)
+        : obj_or_seq_op_term_t(env, term, _poly_type, argspec,
                                std::set<std::string>{"GEOMETRY"}) { }
 private:
     // See comment in geo_term_t about non-determinism
@@ -72,9 +70,8 @@ private:
 
 class geojson_term_t : public geo_term_t {
 public:
-    geojson_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                   backtrace_id_t bt)
-        : geo_term_t(env, term, bt, argspec_t(1)) { }
+    geojson_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : geo_term_t(env, term, argspec_t(1)) { }
 private:
     scoped_ptr_t<val_t> eval_geo(scope_env_t *env, args_t *args, eval_flags_t) const {
         scoped_ptr_t<val_t> v = args->arg(env, 0);
@@ -100,9 +97,8 @@ private:
 // It's also deterministic.
 class to_geojson_term_t : public op_term_t {
 public:
-    to_geojson_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                      backtrace_id_t bt)
-        : op_term_t(env, term, bt, argspec_t(1)) { }
+    to_geojson_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : op_term_t(env, term, argspec_t(1)) { }
 private:
     scoped_ptr_t<val_t> eval_impl(scope_env_t *env, args_t *args, eval_flags_t) const {
         scoped_ptr_t<val_t> v = args->arg(env, 0);
@@ -117,9 +113,8 @@ private:
 
 class point_term_t : public geo_term_t {
 public:
-    point_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                 backtrace_id_t bt)
-        : geo_term_t(env, term, bt, argspec_t(2)) { }
+    point_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : geo_term_t(env, term, argspec_t(2)) { }
 private:
     // point_term_t is deterministic because it doesn't perform any complex
     // arithmetics. It only checks the range of the values as part of
@@ -178,9 +173,8 @@ lon_lat_line_t parse_line_from_args(scope_env_t *env, args_t *args) {
 
 class line_term_t : public geo_term_t {
 public:
-    line_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                backtrace_id_t bt)
-        : geo_term_t(env, term, bt, argspec_t(2, -1)) { }
+    line_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : geo_term_t(env, term, argspec_t(2, -1)) { }
 private:
     scoped_ptr_t<val_t> eval_geo(scope_env_t *env, args_t *args, eval_flags_t) const {
         const lon_lat_line_t line = parse_line_from_args(env, args);
@@ -195,9 +189,8 @@ private:
 
 class polygon_term_t : public geo_term_t {
 public:
-    polygon_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                   backtrace_id_t bt)
-        : geo_term_t(env, term, bt, argspec_t(3, -1)) { }
+    polygon_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : geo_term_t(env, term, argspec_t(3, -1)) { }
 private:
     scoped_ptr_t<val_t> eval_geo(scope_env_t *env, args_t *args, eval_flags_t) const {
         const lon_lat_line_t shell = parse_line_from_args(env, args);
@@ -212,9 +205,8 @@ private:
 
 class intersects_term_t : public geo_obj_or_seq_op_term_t {
 public:
-    intersects_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                      backtrace_id_t bt)
-        : geo_obj_or_seq_op_term_t(env, term, bt, poly_type_t::FILTER, argspec_t(2)) { }
+    intersects_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : geo_obj_or_seq_op_term_t(env, term, poly_type_t::FILTER, argspec_t(2)) { }
 private:
     scoped_ptr_t<val_t> obj_eval_geo(
             scope_env_t *env, args_t *args, const scoped_ptr_t<val_t> &v0) const {
@@ -230,9 +222,8 @@ private:
 
 class includes_term_t : public geo_obj_or_seq_op_term_t {
 public:
-    includes_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                    backtrace_id_t bt)
-        : geo_obj_or_seq_op_term_t(env, term, bt, poly_type_t::FILTER, argspec_t(2)) { }
+    includes_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : geo_obj_or_seq_op_term_t(env, term, poly_type_t::FILTER, argspec_t(2)) { }
 private:
     scoped_ptr_t<val_t> obj_eval_geo(
             scope_env_t *env, args_t *args, const scoped_ptr_t<val_t> &v0) const {
@@ -292,9 +283,8 @@ dist_unit_t pick_dist_unit(scope_env_t *env, args_t *args) {
 
 class distance_term_t : public geo_term_t {
 public:
-    distance_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                    backtrace_id_t bt)
-        : geo_term_t(env, term, bt, argspec_t(2), optargspec_t({"geo_system", "unit"})) { }
+    distance_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : geo_term_t(env, term, argspec_t(2), optargspec_t({"geo_system", "unit"})) { }
 private:
     scoped_ptr_t<val_t> eval_geo(scope_env_t *env, args_t *args, eval_flags_t) const {
         scoped_ptr_t<val_t> g1_arg = args->arg(env, 0);
@@ -327,9 +317,8 @@ private:
 
 class circle_term_t : public geo_term_t {
 public:
-    circle_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                  backtrace_id_t bt)
-        : geo_term_t(env, term, bt, argspec_t(2),
+    circle_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : geo_term_t(env, term, argspec_t(2),
           optargspec_t({"geo_system", "unit", "fill", "num_vertices"})) { }
 private:
     scoped_ptr_t<val_t> eval_geo(scope_env_t *env, args_t *args, eval_flags_t) const {
@@ -374,9 +363,8 @@ private:
 
 class get_intersecting_term_t : public geo_term_t {
 public:
-    get_intersecting_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                            backtrace_id_t bt)
-        : geo_term_t(env, term, bt, argspec_t(2), optargspec_t({ "index" })) { }
+    get_intersecting_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : geo_term_t(env, term, argspec_t(2), optargspec_t({ "index" })) { }
 private:
     scoped_ptr_t<val_t> eval_geo(scope_env_t *env, args_t *args, eval_flags_t) const {
         counted_t<table_t> table = args->arg(env, 0)->as_table();
@@ -397,9 +385,8 @@ private:
 
 class fill_term_t : public geo_term_t {
 public:
-    fill_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                backtrace_id_t bt)
-        : geo_term_t(env, term, bt, argspec_t(1)) { }
+    fill_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : geo_term_t(env, term, argspec_t(1)) { }
 private:
     scoped_ptr_t<val_t> eval_geo(scope_env_t *env, args_t *args, eval_flags_t) const {
         scoped_ptr_t<val_t> l_arg = args->arg(env, 0);
@@ -416,9 +403,8 @@ private:
 
 class get_nearest_term_t : public geo_term_t {
 public:
-    get_nearest_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                       backtrace_id_t bt)
-        : geo_term_t(env, term, bt, argspec_t(2),
+    get_nearest_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : geo_term_t(env, term, argspec_t(2),
           optargspec_t({ "index", "max_results", "max_dist", "geo_system", "unit" })) { }
 private:
     scoped_ptr_t<val_t> eval_geo(scope_env_t *env, args_t *args, eval_flags_t) const {
@@ -463,9 +449,8 @@ private:
 
 class polygon_sub_term_t : public geo_term_t {
 public:
-    polygon_sub_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                       backtrace_id_t bt)
-        : geo_term_t(env, term, bt, argspec_t(2)) { }
+    polygon_sub_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : geo_term_t(env, term, argspec_t(2)) { }
 private:
     const datum_t check_arg(scoped_ptr_t<val_t> arg) const {
         const datum_t res = arg->as_ptype(pseudo::geometry_string);
@@ -518,56 +503,56 @@ private:
 
 
 counted_t<term_t> make_geojson_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<geojson_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<geojson_term_t>(env, term);
 }
 counted_t<term_t> make_to_geojson_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<to_geojson_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<to_geojson_term_t>(env, term);
 }
 counted_t<term_t> make_point_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<point_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<point_term_t>(env, term);
 }
 counted_t<term_t> make_line_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<line_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<line_term_t>(env, term);
 }
 counted_t<term_t> make_polygon_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<polygon_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<polygon_term_t>(env, term);
 }
 counted_t<term_t> make_intersects_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<intersects_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<intersects_term_t>(env, term);
 }
 counted_t<term_t> make_includes_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<includes_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<includes_term_t>(env, term);
 }
 counted_t<term_t> make_distance_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<distance_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<distance_term_t>(env, term);
 }
 counted_t<term_t> make_circle_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<circle_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<circle_term_t>(env, term);
 }
 counted_t<term_t> make_get_intersecting_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<get_intersecting_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<get_intersecting_term_t>(env, term);
 }
 counted_t<term_t> make_fill_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<fill_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<fill_term_t>(env, term);
 }
 counted_t<term_t> make_get_nearest_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<get_nearest_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<get_nearest_term_t>(env, term);
 }
 counted_t<term_t> make_polygon_sub_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<polygon_sub_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<polygon_sub_term_t>(env, term);
 }
 
 } // namespace ql

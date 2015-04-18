@@ -16,7 +16,8 @@ namespace ql {
 class term_walker_t {
 public:
     // This constructor checks that the term-tree is well-formed.
-    explicit term_walker_t(Term *root) {
+    term_walker_t(Term *root, backtrace_registry_t *_bt_reg) :
+            bt_reg(_bt_reg) {
         frame_t toplevel_frame(&frames, root->type(), true, datum_t::null());
         walk(root, nullptr, &toplevel_frame);
     }
@@ -32,9 +33,9 @@ public:
         frame_t(intrusive_list_t<frame_t> *_parent_list,
                 Term::TermType _term_type,
                 bool is_zeroth_argument,
-                datum_t _val) :
+                backtrace_id_t _bt) {
             parent_list(_parent_list), term_type(_term_type),
-            val(_val), writes_legal(true)
+            bt(_bt), writes_legal(true)
         {
             frame_t *prev_frame = parent_list->tail();
             if (prev_frame != nullptr) {
@@ -50,7 +51,7 @@ public:
 
         intrusive_list_t<frame_t> *parent_list;
         const Term::TermType term_type;
-        const datum_t val;
+        backtrace_id_t bt;
 
         // True if writes are still legal at this node.  Basically:
         // * Once writes become illegal, they are never legal again.
@@ -61,7 +62,7 @@ public:
         bool writes_legal;
     };
 
-    void walk(Term *t, const frame_t *prev_frame, const frame_t *this_frame) {
+    void walk(Term *t, const frame_t *this_frame) {
         guarantee(this_frame != nullptr);
 
         if (t->type() == Term::NOW && t->args_size() == 0) {
@@ -73,46 +74,40 @@ public:
         }
 
         if (t->type() == Term::ASC || t->type() == Term::DESC) {
+            const frame_t *prev_frame = parent_list->tail();
             if (prev_frame != nullptr && prev_frame->term_type != Term::ORDER_BY) {
                 throw bt_exc_t(Response::COMPILE_ERROR,
                     strprintf("%s may only be used as an argument to ORDER_BY.",
-                              (t->type() == Term::ASC ? "ASC" : "DESC")), backtrace());
+                              (t->type() == Term::ASC ? "ASC" : "DESC")),
+                    bt_reg->datum_backtrace(this_frame->bt));
             }
         }
 
         if (term_is_write_or_meta(t->type()) && !this_frame->writes_legal) {
             throw bt_exc_t(Response::COMPILE_ERROR,
                 strprintf("Cannot nest writes or meta ops in stream operations.  Use "
-                          "FOR_EACH instead."), backtrace());
+                          "FOR_EACH instead."),
+                bt_reg->datum_backtrace(this_frame->bt));
         }
 
         for (int i = 0; i < t->args_size(); ++i) {
             Term *child = t->mutable_args(i);
-            frame_t child_frame(&frames, child->type(), i == 0,
-                                datum_t(static_cast<double>(i)));
+            backtrace_id_t child_bt =
+                bt_reg->new_frame(this_frame->bt, datum_t(static_cast<double>(i)));
+            frame_t child_frame(&frames, child->type(), i == 0, child_bt);
             walk(child, this_frame, &child_frame);
         }
 
         for (int i = 0; i < t->optargs_size(); ++i) {
             Term_AssocPair *ap = t->mutable_optargs(i);
             Term *child = ap->mutable_val();
-            frame_t child_frame(&frames, child->type(), false,
-                                datum_t(ap->key().c_str()));
+            backtrace_id_t child_bt =
+                bt_reg->new_frame(this_frame->bt, datum_t(ap->key().c_str()));
+            frame_t child_frame(&frames, child->type(), false, child_bt);
             walk(child, this_frame, &child_frame);
         }
     }
 private:
-    datum_t backtrace() {
-        std::vector<datum_t> res;
-        res.reserve(frames.size());
-        for (frame_t *f = frames.tail(); f != nullptr; f = frames.prev(f)) {
-            if (f->val.get_type() != datum_t::type_t::R_NULL) {
-                res.push_back(f->val);
-            }
-        }
-        std::reverse(res.begin(), res.end());
-        return datum_t(std::move(res), configured_limits_t::unlimited);
-    }
 
     // Returns true if `t` is a write or a meta op.
     static bool term_is_write_or_meta(Term::TermType type) {
@@ -483,12 +478,13 @@ private:
         }
     }
 
+    backtrace_registry_t *bt_reg;
     datum_t curtime;
     intrusive_list_t<frame_t> frames;
 };
 
-void preprocess_term(Term *root) {
-    term_walker_t walker(root);
+void preprocess_term(Term *root, backtrace_registry_t *bt_reg) {
+    term_walker_t walker(root, bt_reg);
 }
 
 }  // namespace ql

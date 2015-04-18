@@ -27,9 +27,8 @@ namespace ql {
 
 class asc_term_t : public op_term_t {
 public:
-    asc_term_t(compile_env_t *env, const protob_t<const Term> &term,
-               backtrace_id_t bt)
-        : op_term_t(env, term, bt, argspec_t(1)) { }
+    asc_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : op_term_t(env, term, argspec_t(1)) { }
 private:
     virtual scoped_ptr_t<val_t> eval_impl(scope_env_t *env, args_t *args, eval_flags_t) const {
         return args->arg(env, 0);
@@ -39,9 +38,8 @@ private:
 
 class desc_term_t : public op_term_t {
 public:
-    desc_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                backtrace_id_t bt)
-        : op_term_t(env, term, bt, argspec_t(1)) { }
+    desc_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : op_term_t(env, term, argspec_t(1)) { }
 private:
     virtual scoped_ptr_t<val_t> eval_impl(scope_env_t *env, args_t *args, eval_flags_t) const {
         return args->arg(env, 0);
@@ -51,9 +49,8 @@ private:
 
 class orderby_term_t : public op_term_t {
 public:
-    orderby_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                   backtrace_id_t bt)
-        : op_term_t(env, term, bt, argspec_t(1, -1),
+    orderby_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : op_term_t(env, term, argspec_t(1, -1),
           optargspec_t({"index"})), src_term(term) { }
 private:
     enum order_direction_t { ASC, DESC };
@@ -210,9 +207,8 @@ private:
 
 class distinct_term_t : public op_term_t {
 public:
-    distinct_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                    backtrace_id_t bt)
-        : op_term_t(env, term, bt, argspec_t(1), optargspec_t({"index"})) { }
+    distinct_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : op_term_t(env, term, argspec_t(1), optargspec_t({"index"})) { }
 private:
     virtual scoped_ptr_t<val_t> eval_impl(scope_env_t *env, args_t *args,
                                        eval_flags_t) const {
@@ -270,20 +266,20 @@ private:
 };
 
 counted_t<term_t> make_orderby_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<orderby_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<orderby_term_t>(env, term);
 }
 counted_t<term_t> make_distinct_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<distinct_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<distinct_term_t>(env, term);
 }
 counted_t<term_t> make_asc_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<asc_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<asc_term_t>(env, term);
 }
 counted_t<term_t> make_desc_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<desc_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<desc_term_t>(env, term);
 }
 
 } // namespace ql

@@ -23,10 +23,9 @@ wire_func_t::wire_func_t(protob_t<const Term> body,
                          std::vector<sym_t> arg_names,
                          backtrace_id_t bt) {
     // The dummy registry will ensure all sub-terms use this backtrace
-    dummy_backtrace_registry_t dummy_reg(bt);
-    compile_env_t env(var_visibility_t().with_func_arg_name_list(arg_names), &dummy_reg);
+    compile_env_t env(var_visibility_t().with_func_arg_name_list(arg_names));
     func = make_counted<reql_func_t>(bt, var_scope_t(), arg_names,
-                                     compile_term(&env, body, bt));
+                                     compile_term(&env, body));
 }
 
 wire_func_t::wire_func_t(const wire_func_t &copyee)
@@ -117,11 +116,10 @@ archive_result_t deserialize(read_stream_t *s, wire_func_t *wf) {
         res = deserialize<W>(s, &bt);
         if (bad(res)) { return res; }
 
-        dummy_backtrace_registry_t dummy_reg(bt);
         compile_env_t env(
-            scope.compute_visibility().with_func_arg_name_list(arg_names), &dummy_reg);
+            scope.compute_visibility().with_func_arg_name_list(arg_names));
         wf->func = make_counted<reql_func_t>(
-            bt, scope, arg_names, compile_term(&env, body, bt));
+            bt, scope, arg_names, compile_term(&env, body));
         return res;
     } break;
     case wire_func_type_t::JS: {

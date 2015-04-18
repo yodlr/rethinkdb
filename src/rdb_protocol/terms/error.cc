@@ -9,9 +9,8 @@ namespace ql {
 
 class error_term_t : public op_term_t {
 public:
-    error_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                 backtrace_id_t bt)
-        : op_term_t(env, term, bt, argspec_t(0, 1)) { }
+    error_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : op_term_t(env, term, argspec_t(0, 1)) { }
 private:
     virtual scoped_ptr_t<val_t> eval_impl(scope_env_t *env, args_t *args, eval_flags_t) const {
         if (args->num_args() == 0) {
@@ -25,9 +24,8 @@ private:
 
 class default_term_t : public op_term_t {
 public:
-    default_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                   backtrace_id_t bt)
-        : op_term_t(env, term, bt, argspec_t(2)) { }
+    default_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : op_term_t(env, term, argspec_t(2)) { }
 private:
     virtual scoped_ptr_t<val_t> eval_impl(scope_env_t *env, args_t *args, eval_flags_t) const {
         datum_t func_arg;
@@ -86,12 +84,12 @@ private:
 };
 
 counted_t<term_t> make_error_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<error_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<error_term_t>(env, term);
 }
 counted_t<term_t> make_default_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<default_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<default_term_t>(env, term);
 }
 
 

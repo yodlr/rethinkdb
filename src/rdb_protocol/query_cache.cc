@@ -91,16 +91,15 @@ scoped_ptr_t<query_cache_t::ref_t> query_cache_t::create(
     }
 
     counted_t<const term_t> root_term;
-    real_backtrace_registry_t bt_reg;
+    backtrace_registry_t bt_reg;
     std::map<std::string, wire_func_t> global_optargs;
     try {
-        // Parsing the global optargs also pre-processes the query
+        preprocess_term(original_query->mutable_query(), &bt_reg);
         global_optargs = parse_global_optargs(original_query);
 
         Term *t = original_query->mutable_query();
-        compile_env_t compile_env((var_visibility_t()), &bt_reg);
-        root_term = compile_term(&compile_env, original_query.make_child(t),
-                                 backtrace_id_t::empty());
+        compile_env_t compile_env((var_visibility_t()));
+        root_term = compile_term(&compile_env, original_query.make_child(t));
     } catch (const exc_t &e) {
         throw bt_exc_t(Response::COMPILE_ERROR, e.what(),
                        bt_reg.datum_backtrace(e));

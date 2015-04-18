@@ -149,9 +149,8 @@ static int merge_types(int supertype, int subtype) {
 
 class coerce_term_t : public op_term_t {
 public:
-    coerce_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                  backtrace_id_t bt)
-        : op_term_t(env, term, bt, argspec_t(2)) { }
+    coerce_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : op_term_t(env, term, argspec_t(2)) { }
 private:
     virtual scoped_ptr_t<val_t> eval_impl(
         scope_env_t *env, args_t *args, eval_flags_t) const {
@@ -273,9 +272,8 @@ private:
 
 class ungroup_term_t : public op_term_t {
 public:
-    ungroup_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                   backtrace_id_t bt)
-        : op_term_t(env, term, bt, argspec_t(1)) { }
+    ungroup_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : op_term_t(env, term, argspec_t(1)) { }
 private:
     virtual scoped_ptr_t<val_t> eval_impl(scope_env_t *env, args_t *args, eval_flags_t) const {
         counted_t<grouped_data_t> groups
@@ -325,9 +323,8 @@ datum_t typename_of(const scoped_ptr_t<val_t> &v, scope_env_t *env) {
 
 class typeof_term_t : public op_term_t {
 public:
-    typeof_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                  backtrace_id_t bt)
-        : op_term_t(env, term, bt, argspec_t(1)) { }
+    typeof_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : op_term_t(env, term, argspec_t(1)) { }
 private:
     virtual scoped_ptr_t<val_t> eval_impl(scope_env_t *env, args_t *args, eval_flags_t) const {
         return new_val(typename_of(args->arg(env, 0), env));
@@ -338,9 +335,8 @@ private:
 
 class info_term_t : public op_term_t {
 public:
-    info_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                backtrace_id_t bt)
-        : op_term_t(env, term, bt, argspec_t(1)) { }
+    info_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : op_term_t(env, term, argspec_t(1)) { }
 private:
     virtual scoped_ptr_t<val_t> eval_impl(scope_env_t *env, args_t *args, eval_flags_t) const {
         return new_val(val_info(env, args->arg(env, 0)));
@@ -437,20 +433,20 @@ private:
 };
 
 counted_t<term_t> make_coerce_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<coerce_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<coerce_term_t>(env, term);
 }
 counted_t<term_t> make_ungroup_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<ungroup_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<ungroup_term_t>(env, term);
 }
 counted_t<term_t> make_typeof_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<typeof_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<typeof_term_t>(env, term);
 }
 counted_t<term_t> make_info_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<info_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<info_term_t>(env, term);
 }
 
 } // namespace ql

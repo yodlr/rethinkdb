@@ -9,9 +9,8 @@ namespace ql {
 
 class var_term_t : public term_t {
 public:
-    var_term_t(compile_env_t *env, const protob_t<const Term> &term,
-               backtrace_id_t bt)
-        : term_t(term, bt) {
+    var_term_t(compile_env_t *env, const protob_t<const Term> &term)
+            : term_t(term) {
         rcheck(term->args_size() == 1, base_exc_t::GENERIC,
                "A variable term has the wrong number of arguments.");
 
@@ -55,9 +54,8 @@ private:
 
 class implicit_var_term_t : public term_t {
 public:
-    implicit_var_term_t(compile_env_t *env, const protob_t<const Term> &term,
-                        backtrace_id_t bt)
-        : term_t(term, bt) {
+    implicit_var_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : term_t(term) {
         rcheck(
             term->args_size() == 0 && term->optargs_size() == 0, base_exc_t::GENERIC,
             "Expected no arguments or optional arguments on implicit variable term.");
@@ -83,12 +81,12 @@ private:
 };
 
 counted_t<term_t> make_var_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<var_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<var_term_t>(env, term);
 }
 counted_t<term_t> make_implicit_var_term(
-        compile_env_t *env, const protob_t<const Term> &term, backtrace_id_t bt) {
-    return make_counted<implicit_var_term_t>(env, term, bt);
+        compile_env_t *env, const protob_t<const Term> &term) {
+    return make_counted<implicit_var_term_t>(env, term);
 }
 
 } // namespace ql

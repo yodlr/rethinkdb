@@ -22,8 +22,7 @@ enum poly_type_t {
 
 class obj_or_seq_op_impl_t {
 public:
-    obj_or_seq_op_impl_t(compile_env_t *env,
-                         const term_t *self,
+    obj_or_seq_op_impl_t(const term_t *self,
                          poly_type_t _poly_type,
                          protob_t<const Term> term,
                          std::set<std::string> &&_acceptable_ptypes);
@@ -38,7 +37,6 @@ private:
     protob_t<Term> func;
     const term_t *parent;
     const std::set<std::string> acceptable_ptypes;
-    backtrace_patch_t bt_patch;
 
     DISABLE_COPYING(obj_or_seq_op_impl_t);
 };
@@ -49,11 +47,10 @@ private:
 class obj_or_seq_op_term_t : public grouped_seq_op_term_t {
 public:
     obj_or_seq_op_term_t(compile_env_t *env, protob_t<const Term> term,
-                         backtrace_id_t bt, poly_type_t _poly_type,
-                         argspec_t argspec);
+                         poly_type_t _poly_type, argspec_t argspec);
     obj_or_seq_op_term_t(compile_env_t *env, protob_t<const Term> term,
-                         backtrace_id_t bt, poly_type_t _poly_type,
-                         argspec_t argspec, std::set<std::string> &&ptypes);
+                         poly_type_t _poly_type, argspec_t argspec,
+                         std::set<std::string> &&ptypes);
 
 private:
     virtual scoped_ptr_t<val_t> obj_eval(scope_env_t *env,
