@@ -69,7 +69,7 @@ public:
         bool writes_legal;
     };
 
-    void walk(Term *t, const frame_t *this_frame) {
+    void walk(Term *t, frame_t *this_frame) {
         guarantee(this_frame != nullptr);
         if (t->type() == Term::NOW && t->args_size() == 0) {
             // Construct curtime the first time we access it
@@ -80,7 +80,7 @@ public:
         }
 
         if (t->type() == Term::ASC || t->type() == Term::DESC) {
-            const frame_t *prev_frame = frames.tail();
+            const frame_t *prev_frame = frames.prev(this_frame);
             if (prev_frame != nullptr && prev_frame->term_type != Term::ORDER_BY) {
                 throw bt_exc_t(Response::COMPILE_ERROR,
                     strprintf("%s may only be used as an argument to ORDER_BY.",
