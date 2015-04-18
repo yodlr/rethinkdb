@@ -45,6 +45,7 @@ bool is_noreply(const protob_t<const Query> &q) {
 
 wire_func_t construct_optarg_wire_func(const Term &val) {
     protob_t<Term> arg = r::fun(r::expr(val)).release_counted();
+    propagate_backtrace(arg.get(), backtrace_id_t::empty());
 
     compile_env_t empty_compile_env((var_visibility_t()));
     counted_t<func_term_t> func_term
@@ -70,7 +71,6 @@ std::map<std::string, wire_func_t> parse_global_optargs(protob_t<Query> q) {
     // Supply a default db of "test" if there is no "db" optarg.
     if (!optargs.count("db")) {
         Term arg = r::db("test").get();
-        propagate_backtrace(&arg, backtrace_id_t::empty());
         optargs["db"] = construct_optarg_wire_func(arg);
     }
 

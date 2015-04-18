@@ -11,8 +11,8 @@
 
 namespace ql {
 
-func_t::func_t(backtrace_id_t bt_source)
-  : bt_rcheckable_t(bt_source) { }
+func_t::func_t(backtrace_id_t bt)
+  : bt_rcheckable_t(bt) { }
 func_t::~func_t() { }
 
 scoped_ptr_t<val_t> func_t::call(env_t *env, eval_flags_t eval_flags) const {

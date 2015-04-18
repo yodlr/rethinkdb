@@ -60,7 +60,7 @@ public:
                              eval_flags_t eval_flags = NO_FLAGS) const;
 
 protected:
-    explicit func_t(backtrace_id_t bt_source);
+    explicit func_t(backtrace_id_t bt);
 
 private:
     virtual bool filter_helper(env_t *env, datum_t arg) const = 0;
@@ -150,19 +150,19 @@ protected:
 // function as their argument.
 
 counted_t<const func_t> new_constant_func(datum_t obj,
-                                          backtrace_id_t root);
+                                          backtrace_id_t bt);
 
 counted_t<const func_t> new_pluck_func(datum_t obj,
-                                       backtrace_id_t bt_src);
+                                       backtrace_id_t bt);
 
 counted_t<const func_t> new_get_field_func(datum_t obj,
-                                           backtrace_id_t bt_src);
+                                           backtrace_id_t bt);
 
 counted_t<const func_t> new_eq_comparison_func(datum_t obj,
-                                               backtrace_id_t bt_src);
+                                               backtrace_id_t bt);
 
 counted_t<const func_t> new_page_func(datum_t method,
-                                      backtrace_id_t bt_src);
+                                      backtrace_id_t bt);
 
 class js_result_visitor_t : public boost::static_visitor<val_t *> {
 public:

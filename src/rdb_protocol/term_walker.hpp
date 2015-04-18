@@ -1,10 +1,7 @@
 #ifndef RDB_PROTOCOL_TERM_WALKER_HPP_
 #define RDB_PROTOCOL_TERM_WALKER_HPP_
 
-#include <stdexcept>
-#include <string>
-
-#include "rdb_protocol/datum.hpp"
+#include "rdb_protocol/error.hpp"
 
 class Term;
 

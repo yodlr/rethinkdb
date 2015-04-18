@@ -3,7 +3,6 @@
 
 #include <string>
 
-#include "rdb_protocol/backtrace.hpp"
 #include "rdb_protocol/error.hpp"
 #include "rdb_protocol/minidriver.hpp"
 #include "rdb_protocol/op.hpp"

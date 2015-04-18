@@ -92,7 +92,7 @@ public:
 protected:
     bool batch_cache_exhausted() const;
     void check_not_grouped(const char *msg);
-    explicit datum_stream_t(backtrace_id_t bt_src);
+    explicit datum_stream_t(backtrace_id_t bt);
 
 private:
     virtual std::vector<datum_t>
@@ -185,7 +185,7 @@ private:
 class array_datum_stream_t : public eager_datum_stream_t {
 public:
     array_datum_stream_t(datum_t _arr,
-                         backtrace_id_t bt_src);
+                         backtrace_id_t bt);
     virtual bool is_exhausted() const;
     virtual feed_type_t cfeed_type() const;
     virtual bool is_infinite() const;
@@ -246,7 +246,7 @@ class union_datum_stream_t : public datum_stream_t, public home_thread_mixin_t {
 public:
     union_datum_stream_t(env_t *env,
                          std::vector<counted_t<datum_stream_t> > &&_streams,
-                         backtrace_id_t bt_src);
+                         backtrace_id_t bt);
 
     virtual void add_transformation(transform_variant_t &&tv,
                                     backtrace_id_t bt);
@@ -322,7 +322,7 @@ class map_datum_stream_t : public eager_datum_stream_t {
 public:
     map_datum_stream_t(std::vector<counted_t<datum_stream_t> > &&_streams,
                        counted_t<const func_t> &&_func,
-                       backtrace_id_t bt_src);
+                       backtrace_id_t bt);
 
     virtual std::vector<datum_t>
     next_raw_batch(env_t *env, const batchspec_t &batchspec);
@@ -646,7 +646,7 @@ class lazy_datum_stream_t : public datum_stream_t {
 public:
     lazy_datum_stream_t(
         scoped_ptr_t<reader_t> &&_reader,
-        backtrace_id_t bt_src);
+        backtrace_id_t bt);
 
     virtual bool is_array() const { return false; }
     virtual datum_t as_array(UNUSED env_t *env) {
@@ -683,7 +683,7 @@ class vector_datum_stream_t : public eager_datum_stream_t
 {
 public:
     vector_datum_stream_t(
-            backtrace_id_t bt_source,
+            backtrace_id_t bt,
             std::vector<datum_t> &&_rows,
             boost::optional<ql::changefeed::keyspec_t> &&_changespec);
 private:

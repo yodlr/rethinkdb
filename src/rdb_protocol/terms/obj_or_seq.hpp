@@ -5,7 +5,6 @@
 #include <functional>
 
 #include "containers/counted.hpp"
-#include "rdb_protocol/backtrace.hpp"
 #include "rdb_protocol/counted_term.hpp"
 #include "rdb_protocol/op.hpp"
 #include "rdb_protocol/pb_utils.hpp"

@@ -78,4 +78,4 @@ void fill_error(Response *res,
     fill_backtrace(res->mutable_backtrace(), backtrace);
 }
 
-}
+} // namespace ql

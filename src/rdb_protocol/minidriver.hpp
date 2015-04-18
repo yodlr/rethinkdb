@@ -6,7 +6,6 @@
 #include <utility>
 #include <algorithm>
 
-#include "rdb_protocol/backtrace.hpp"
 #include "rdb_protocol/counted_term.hpp"
 #include "rdb_protocol/datum.hpp"
 #include "rdb_protocol/env.hpp"

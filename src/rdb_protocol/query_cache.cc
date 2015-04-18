@@ -263,7 +263,7 @@ void query_cache_t::ref_t::fill_response(Response *res) {
                        entry->bt_reg.datum_backtrace(ex));
     } catch (const std::exception &ex) {
         query_cache->terminate_internal(entry);
-        throw bt_exc_t(Response::RUNTIME_ERROR, ex.what(), 
+        throw bt_exc_t(Response::RUNTIME_ERROR, ex.what(),
                        backtrace_registry_t::EMPTY_BACKTRACE);
     }
 }

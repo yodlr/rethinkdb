@@ -711,8 +711,8 @@ counted_t<datum_stream_t> datum_stream_t::ordered_distinct() {
     return make_counted<ordered_distinct_datum_stream_t>(counted_from_this());
 }
 
-datum_stream_t::datum_stream_t(backtrace_id_t bt_src)
-    : bt_rcheckable_t(bt_src), batch_cache_index(0), grouped(false) {
+datum_stream_t::datum_stream_t(backtrace_id_t bt)
+    : bt_rcheckable_t(bt), batch_cache_index(0), grouped(false) {
 }
 
 void datum_stream_t::add_grouping(transform_variant_t &&tv,
@@ -842,10 +842,9 @@ datum_t eager_datum_stream_t::as_array(env_t *env) {
 }
 
 // LAZY_DATUM_STREAM_T
-lazy_datum_stream_t::lazy_datum_stream_t(
-    scoped_ptr_t<reader_t> &&_reader,
-    backtrace_id_t bt_src)
-    : datum_stream_t(bt_src),
+lazy_datum_stream_t::lazy_datum_stream_t(scoped_ptr_t<reader_t> &&_reader,
+                                         backtrace_id_t bt)
+    : datum_stream_t(bt),
       current_batch_offset(0),
       reader(std::move(_reader)) { }
 
@@ -882,8 +881,8 @@ bool lazy_datum_stream_t::is_infinite() const {
 }
 
 array_datum_stream_t::array_datum_stream_t(datum_t _arr,
-                                           backtrace_id_t bt_source)
-    : eager_datum_stream_t(bt_source), index(0), arr(_arr) { }
+                                           backtrace_id_t bt)
+    : eager_datum_stream_t(bt), index(0), arr(_arr) { }
 
 datum_t array_datum_stream_t::next(env_t *env, const batchspec_t &bs) {
     return ops_to_do() ? datum_stream_t::next(env, bs) : next_arr_el();
@@ -1187,10 +1186,10 @@ private:
 };
 
 union_datum_stream_t::union_datum_stream_t(
-    env_t *env,
-    std::vector<counted_t<datum_stream_t> > &&streams,
-    backtrace_id_t bt_src)
-    : datum_stream_t(bt_src),
+        env_t *env,
+        std::vector<counted_t<datum_stream_t> > &&streams,
+        backtrace_id_t bt)
+    : datum_stream_t(bt),
       union_type(feed_type_t::not_feed),
       is_infinite_union(false),
       active(0),
@@ -1344,8 +1343,8 @@ std::vector<changefeed::keyspec_t> union_datum_stream_t::get_change_specs() {
 range_datum_stream_t::range_datum_stream_t(bool _is_infinite_range,
                                            int64_t _start,
                                            int64_t _stop,
-                                           backtrace_id_t bt_source)
-    : eager_datum_stream_t(bt_source),
+                                           backtrace_id_t bt)
+    : eager_datum_stream_t(bt),
       is_infinite_range(_is_infinite_range),
       start(_start),
       stop(_stop) { }
@@ -1389,10 +1388,11 @@ bool range_datum_stream_t::is_exhausted() const {
 }
 
 // MAP_DATUM_STREAM_T
-map_datum_stream_t::map_datum_stream_t(std::vector<counted_t<datum_stream_t> > &&_streams,
-                                       counted_t<const func_t> &&_func,
-                                       backtrace_id_t bt_src)
-    : eager_datum_stream_t(bt_src), streams(std::move(_streams)), func(std::move(_func)),
+map_datum_stream_t::map_datum_stream_t(
+        std::vector<counted_t<datum_stream_t> > &&_streams,
+        counted_t<const func_t> &&_func,
+        backtrace_id_t bt)
+    : eager_datum_stream_t(bt), streams(std::move(_streams)), func(std::move(_func)),
       union_type(feed_type_t::not_feed), is_array_map(true), is_infinite_map(true) {
     for (const auto &stream : streams) {
         is_array_map &= stream->is_array();
@@ -1444,10 +1444,10 @@ bool map_datum_stream_t::is_exhausted() const {
 }
 
 vector_datum_stream_t::vector_datum_stream_t(
-        backtrace_id_t bt_source,
+        backtrace_id_t bt,
         std::vector<datum_t> &&_rows,
         boost::optional<ql::changefeed::keyspec_t> &&_changespec) :
-    eager_datum_stream_t(bt_source),
+    eager_datum_stream_t(bt),
     rows(std::move(_rows)),
     index(0),
     changespec(std::move(_changespec)) { }

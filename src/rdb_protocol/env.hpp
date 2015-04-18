@@ -28,7 +28,6 @@ class RE2;
 namespace ql {
 class datum_t;
 class term_t;
-class backtrace_registry_t;
 
 /* If and optarg with the given key is present and is of type DATUM it will be
  * returned. Otherwise an empty datum_t will be returned. */
@@ -157,8 +156,6 @@ private:
 
     DISABLE_COPYING(env_t);
 };
-
-class backtrace_registry_t;
 
 // An environment in which expressions are compiled.  Since compilation doesn't
 // evaluate anything, it doesn't need an env_t *.

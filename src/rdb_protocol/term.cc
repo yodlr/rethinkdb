@@ -17,7 +17,7 @@
 
 namespace ql {
 
-counted_t<const term_t> compile_term(compile_env_t *env, protob_t<const Term> t) {
+counted_t<const term_t> compile_term(compile_env_t *env, const protob_t<const Term> t) {
     // HACK: per @srh, use unlimited array size at compile time
     ql::configured_limits_t limits = ql::configured_limits_t::unlimited;
     switch (t->type()) {
@@ -278,7 +278,7 @@ runtime_term_t::runtime_term_t(backtrace_id_t bt)
 runtime_term_t::~runtime_term_t() { }
 
 term_t::term_t(protob_t<const Term> _src)
-    : runtime_term_t(backtrace_id_t(_src->GetExtension(ql2::extension::backtrace_id))),
+    : runtime_term_t(backtrace_id_t(_src.get())),
       src(_src) { }
 
 term_t::~term_t() { }
