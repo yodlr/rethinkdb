@@ -41,22 +41,16 @@ reql_t boolean(bool b) {
     return reql_t(datum_t(datum_t::construct_boolean_t(), b));
 }
 
-void reql_t::copy_optargs_from_term(const Term &from,
-                                    backtrace_patch_t *bt_patch) {
+void reql_t::copy_optargs_from_term(const Term &from) {
     for (int i = 0; i < from.optargs_size(); ++i) {
         const Term_AssocPair &o = from.optargs(i);
         add_arg(r::optarg(o.key(), o.val()));
-        const Term *new_term = &term->optargs(term->optargs_size() - 1).val();
-        bt_patch->add_patch(new_term, datum_t(o.key().c_str()));
     }
 }
 
-void reql_t::copy_args_from_term(const Term &from, size_t start_index,
-                                 backtrace_patch_t *bt_patch) {
+void reql_t::copy_args_from_term(const Term &from, size_t start_index) {
     for (int i = start_index; i < from.args_size(); ++i) {
         add_arg(from.args(i));
-        const Term *new_term = &term->args(term->args_size() - 1);
-        bt_patch->add_patch(new_term, datum_t(static_cast<double>(i)));
     }
 }
 

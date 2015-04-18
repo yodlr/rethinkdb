@@ -12,6 +12,7 @@
 #include "rdb_protocol/pb_utils.hpp"
 #include "rdb_protocol/pseudo_literal.hpp"
 #include "rdb_protocol/minidriver.hpp"
+#include "rdb_protocol/term_walker.hpp"
 #include "rdb_protocol/terms/arr.hpp"
 #include "rdb_protocol/terms/obj_or_seq.hpp"
 
@@ -43,6 +44,8 @@ obj_or_seq_op_impl_t::obj_or_seq_op_impl_t(
     } break;
     default: unreachable();
     }
+
+    propagate_backtrace(func.get(), self->backtrace());
 }
 
 scoped_ptr_t<val_t> obj_or_seq_op_impl_t::eval_impl_dereferenced(
@@ -122,14 +125,14 @@ obj_or_seq_op_term_t::obj_or_seq_op_term_t(
         compile_env_t *env, const protob_t<const Term> term,
         poly_type_t _poly_type, argspec_t argspec)
     : grouped_seq_op_term_t(env, term, argspec, optargspec_t({"_NO_RECURSE_"})),
-      impl(env, this, _poly_type, term, std::set<std::string>()) {
+      impl(this, _poly_type, term, std::set<std::string>()) {
 }
 
 obj_or_seq_op_term_t::obj_or_seq_op_term_t(
         compile_env_t *env, protob_t<const Term> term,
         poly_type_t _poly_type, argspec_t argspec, std::set<std::string> &&ptypes)
     : grouped_seq_op_term_t(env, term, argspec, optargspec_t({"_NO_RECURSE_"})),
-      impl(env, this, _poly_type, term, std::move(ptypes)) {
+      impl(this, _poly_type, term, std::move(ptypes)) {
 }
 
 scoped_ptr_t<val_t> obj_or_seq_op_term_t::eval_impl(scope_env_t *env, args_t *args,
@@ -311,7 +314,7 @@ public:
     bracket_term_t(compile_env_t *env, const protob_t<const Term> &term)
         : grouped_seq_op_term_t(env, term, argspec_t(2),
                                 optargspec_t({"_NO_RECURSE_"})),
-          impl(env, this, SKIP_MAP, term, std::set<std::string>()) {}
+          impl(this, SKIP_MAP, term, std::set<std::string>()) {}
 private:
     scoped_ptr_t<val_t> obj_eval_dereferenced(
         const scoped_ptr_t<val_t> &v0, const scoped_ptr_t<val_t> &v1) const {

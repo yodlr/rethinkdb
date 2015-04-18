@@ -104,10 +104,8 @@ public:
 
     void swap(Term &t);
 
-    void copy_optargs_from_term(const Term &from,
-                                backtrace_patch_t *bt_patch);
-    void copy_args_from_term(const Term &from, size_t start_index,
-                             backtrace_patch_t *bt_patch);
+    void copy_optargs_from_term(const Term &from);
+    void copy_args_from_term(const Term &from, size_t start_index);
 
 #define REQL_METHOD(name, termtype)                                     \
     template<class... T>                                                \

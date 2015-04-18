@@ -113,7 +113,7 @@ public:
 private:
     struct entry_t {
         entry_t(protob_t<Query> _original_query,
-                real_backtrace_registry_t &&_bt_reg,
+                backtrace_registry_t &&_bt_reg,
                 std::map<std::string, wire_func_t> &&_global_optargs,
                 counted_t<const term_t> _root_term);
         ~entry_t();
@@ -122,7 +122,7 @@ private:
 
         const uuid_u job_id;
         const protob_t<Query> original_query;
-        const real_backtrace_registry_t bt_reg;
+        const backtrace_registry_t bt_reg;
         const std::map<std::string, wire_func_t> global_optargs;
         const profile_bool_t profile;
         const microtime_t start_time;

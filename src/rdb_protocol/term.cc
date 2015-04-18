@@ -277,8 +277,10 @@ runtime_term_t::runtime_term_t(backtrace_id_t bt)
 
 runtime_term_t::~runtime_term_t() { }
 
-term_t::term_t(protob_t<const Term> _src, backtrace_id_t bt)
-    : runtime_term_t(bt), src(_src) { }
+term_t::term_t(protob_t<const Term> _src)
+    : runtime_term_t(backtrace_id_t(_src->GetExtension(ql2::extension::backtrace_id))),
+      src(_src) { }
+
 term_t::~term_t() { }
 
 // Uncomment the define to enable instrumentation (you'll be able to see where

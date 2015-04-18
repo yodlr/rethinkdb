@@ -54,13 +54,7 @@ wire_func_t construct_optarg_wire_func(const Term &val) {
 }
 
 std::map<std::string, wire_func_t> parse_global_optargs(protob_t<Query> q) {
-    rassert(q.has());
-
-    Term *t = q->mutable_query();
-    preprocess_term(t);
-
     std::map<std::string, wire_func_t> optargs;
-
     for (int i = 0; i < q->global_optargs_size(); ++i) {
         const Query::AssocPair &ap = q->global_optargs(i);
         auto insert_res
@@ -76,6 +70,7 @@ std::map<std::string, wire_func_t> parse_global_optargs(protob_t<Query> q) {
     // Supply a default db of "test" if there is no "db" optarg.
     if (!optargs.count("db")) {
         Term arg = r::db("test").get();
+        propagate_backtrace(&arg, backtrace_id_t::empty());
         optargs["db"] = construct_optarg_wire_func(arg);
     }
 

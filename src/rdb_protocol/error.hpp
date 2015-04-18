@@ -20,6 +20,8 @@ public:
     // The 0 ID corresponds to an empty backtrace
     backtrace_id_t() : id(0) { };
     backtrace_id_t(uint32_t _id) : id(_id) { }
+    backtrace_id_t(const Term *t) :
+        id(t->GetExtension(ql2::extension::backtrace_id)) { }
     static backtrace_id_t empty() {
         return backtrace_id_t();
     }

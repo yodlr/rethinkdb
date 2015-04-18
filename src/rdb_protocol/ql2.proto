@@ -759,6 +759,8 @@ message Term {
     repeated AssocPair optargs = 4; // Holds the optional arguments of the query.
     // (Note that the order of the optional arguments doesn't matter; think of a
     // Hash.)
+
+    extensions 10000 to 20000;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

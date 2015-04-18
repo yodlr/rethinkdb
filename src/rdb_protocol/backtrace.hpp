@@ -34,28 +34,18 @@ public:
 
 class backtrace_registry_t {
 public:
+    backtrace_registry_t();
+    backtrace_registry_t(backtrace_registry_t &&other) :
+        frames(std::move(other.frames)) { }
     virtual ~backtrace_registry_t() { }
 
-    virtual backtrace_id_t new_frame(backtrace_id_t parent_bt,
-                                     const Term *t,
-                                     const datum_t &val) = 0;
-
-    static const datum_t EMPTY_BACKTRACE;
-};
-
-class real_backtrace_registry_t : public backtrace_registry_t {
-public:
-    real_backtrace_registry_t();
-    real_backtrace_registry_t(real_backtrace_registry_t &&other) :
-        frames(std::move(other.frames)) { }
-    virtual ~real_backtrace_registry_t() { }
-
     backtrace_id_t new_frame(backtrace_id_t parent_bt,
-                             const Term *t,
                              const datum_t &val);
 
     datum_t datum_backtrace(const exc_t &ex) const;
     datum_t datum_backtrace(backtrace_id_t bt, size_t dummy_frames = 0) const;
+
+    static const datum_t EMPTY_BACKTRACE;
 
 private:
     struct frame_t {
@@ -68,7 +58,7 @@ private:
     };
 
     std::vector<frame_t> frames;
-    DISABLE_COPYING(real_backtrace_registry_t);
+    DISABLE_COPYING(backtrace_registry_t);
 };
 
 void fill_backtrace(Backtrace *bt_out,

@@ -53,7 +53,7 @@ private:
 
 class term_t : public runtime_term_t {
 public:
-    explicit term_t(protob_t<const Term> _src, backtrace_id_t bt);
+    explicit term_t(protob_t<const Term> _src);
     virtual ~term_t();
 
 
@@ -70,7 +70,7 @@ private:
 };
 
 counted_t<const term_t> compile_term(
-    compile_env_t *env, protob_t<const Term> t, backtrace_id_t bt);
+    compile_env_t *env, protob_t<const Term> t);
 
 } // namespace ql
 

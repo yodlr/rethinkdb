@@ -18,14 +18,9 @@ backtrace_registry_t::backtrace_registry_t() {
 }
 
 backtrace_id_t backtrace_registry_t::new_frame(backtrace_id_t parent_bt,
-                                               const Term *t,
                                                const datum_t &val) {
-    backtrace_id_t res;
-    if (!check_for_patch(t, &res)) {
-        frames.emplace_back(parent_bt, val);
-        res = backtrace_id_t(frames.size() - 1);
-    }
-    return res;
+    frames.emplace_back(parent_bt, val);
+    return backtrace_id_t(frames.size() - 1);
 }
 
 datum_t backtrace_registry_t::datum_backtrace(const exc_t &ex) const {
@@ -33,10 +28,11 @@ datum_t backtrace_registry_t::datum_backtrace(const exc_t &ex) const {
 }
 
 datum_t backtrace_registry_t::datum_backtrace(backtrace_id_t bt,
-                                              size_t dummy_frames = 0) const {
-    r_sanity_check(bt < frames.size());
+                                              size_t dummy_frames) const {
+    r_sanity_check(bt.get() < frames.size());
     std::vector<datum_t> res;
-    for (const frame_t *f = &frames[bt]; !f->is_head(); f = &frames[f->parent.get()]) {
+    for (const frame_t *f = &frames[bt.get()];
+         !f->is_head(); f = &frames[f->parent.get()]) {
         r_sanity_check(f->parent.get() < frames.size());
         if (dummy_frames > 0) {
             --dummy_frames;

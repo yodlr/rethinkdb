@@ -10,6 +10,7 @@
 #include "rdb_protocol/func.hpp"
 #include "rdb_protocol/op.hpp"
 #include "rdb_protocol/minidriver.hpp"
+#include "rdb_protocol/term_walker.hpp"
 
 namespace ql {
 
@@ -77,6 +78,7 @@ public:
             pb::dummy_var_t x = pb::dummy_var_t::SINDEXCREATE_X;
             protob_t<Term> func_term
                 = r::fun(x, r::var(x)[name_datum]).release_counted();
+            propagate_backtrace(func_term.get(), backtrace());
 
             compile_env_t empty_compile_env((var_visibility_t()));
             counted_t<func_term_t> func_term_term = make_counted<func_term_t>(

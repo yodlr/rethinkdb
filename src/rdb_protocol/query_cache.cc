@@ -354,7 +354,7 @@ void query_cache_t::ref_t::serve(env_t *env, Response *res) {
 }
 
 query_cache_t::entry_t::entry_t(protob_t<Query> _original_query,
-                                real_backtrace_registry_t &&_bt_reg,
+                                backtrace_registry_t &&_bt_reg,
                                 std::map<std::string, wire_func_t> &&_global_optargs,
                                 counted_t<const term_t> _root_term) :
         state(state_t::START),
