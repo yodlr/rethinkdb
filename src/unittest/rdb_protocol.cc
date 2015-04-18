@@ -777,7 +777,8 @@ TPTEST(RDBProtocol, ArtificialChangefeeds) {
     dummy_artificial_t artificial_cfeed;
     struct cfeed_bundle_t {
         cfeed_bundle_t(ql::env_t *env, artificial_t *a)
-            : point_0(a->subscribe(
+            : bt(ql::backtrace_id_t::empty()),
+              point_0(a->subscribe(
                           env,
                           false,
                           keyspec_t::point_t{ql::datum_t(0.0)},

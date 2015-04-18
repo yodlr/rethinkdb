@@ -18,13 +18,12 @@
 namespace ql {
 
 obj_or_seq_op_impl_t::obj_or_seq_op_impl_t(
-        const term_t *self, poly_type_t _poly_type,
-        protob_t<const Term> term, std::set<std::string> &&_acceptable_ptypes)
+        const term_t *self, poly_type_t _poly_type, const protob_t<const Term> term,
+        std::set<std::string> &&_acceptable_ptypes)
     : poly_type(_poly_type), func(make_counted_term()), parent(self),
       acceptable_ptypes(std::move(_acceptable_ptypes)) {
     auto varnum = pb::dummy_var_t::OBJORSEQ_VARNUM;
 
-    // TODO: RSI: preserve backtraces from the original terms
     // body is a new reql expression similar to term except that the first argument
     // is replaced by a new variable.
     // For example, foo.pluck('a') becomes varnum.pluck('a')
@@ -90,7 +89,6 @@ scoped_ptr_t<val_t> obj_or_seq_op_impl_t::eval_impl_dereferenced(
         }
 
         compile_env_t compile_env(env->scope.compute_visibility());
-
         counted_t<func_term_t> func_term
             = make_counted<func_term_t>(&compile_env, func);
         counted_t<const func_t> f = func_term->eval_to_func(env->scope);
@@ -128,7 +126,7 @@ obj_or_seq_op_term_t::obj_or_seq_op_term_t(
 }
 
 obj_or_seq_op_term_t::obj_or_seq_op_term_t(
-        compile_env_t *env, protob_t<const Term> term,
+        compile_env_t *env, const protob_t<const Term> term,
         poly_type_t _poly_type, argspec_t argspec, std::set<std::string> &&ptypes)
     : grouped_seq_op_term_t(env, term, argspec, optargspec_t({"_NO_RECURSE_"})),
       impl(this, _poly_type, term, std::move(ptypes)) {
@@ -360,7 +358,7 @@ private:
 };
 
 counted_t<term_t> make_get_field_term(
-    compile_env_t *env, const protob_t<const Term> &term) {
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<get_field_term_t>(env, term);
 }
 

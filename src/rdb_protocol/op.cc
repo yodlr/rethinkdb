@@ -1,7 +1,6 @@
 // Copyright 2010-2013 RethinkDB, all rights reserved.
 #include "rdb_protocol/op.hpp"
 
-#include "rdb_protocol/backtrace.hpp"
 #include "rdb_protocol/func.hpp"
 #include "rdb_protocol/minidriver.hpp"
 #include "rdb_protocol/validate.hpp"
@@ -173,24 +172,19 @@ op_term_t::op_term_t(compile_env_t *env, const protob_t<const Term> term,
             = compile_term(env, term.make_child(&term->args(i)));
         original_args.push_back(t);
     }
-    arg_terms.init(new arg_terms_t(term, std::move(argspec),
-                                   std::move(original_args)));
+    arg_terms.init(new arg_terms_t(term, std::move(argspec), std::move(original_args)));
 
     for (int i = 0; i < term->optargs_size(); ++i) {
         const Term_AssocPair *ap = &term->optargs(i);
-        rcheck_src(backtrace_id_t(&ap->val()),
-                   optargspec.contains(ap->key()),
-                   base_exc_t::GENERIC,
-                   strprintf("Unrecognized optional argument `%s`.",
-                             ap->key().c_str()));
+        rcheck_src(backtrace_id_t(&ap->val()), optargspec.contains(ap->key()),
+                   base_exc_t::GENERIC, strprintf("Unrecognized optional argument `%s`.",
+                                                  ap->key().c_str()));
         counted_t<const term_t> t =
             compile_term(env, term.make_child(&ap->val()));
         auto res = optargs.insert(std::make_pair(ap->key(), std::move(t)));
-        rcheck_src(backtrace_id_t(&ap->val()),
-                   res.second,
-                   base_exc_t::GENERIC,
-                   strprintf("Duplicate optional argument: %s",
-                             ap->key().c_str()));
+        rcheck_src(backtrace_id_t(&ap->val()), res.second,
+                   base_exc_t::GENERIC, strprintf("Duplicate optional argument: %s",
+                                                  ap->key().c_str()));
     }
 }
 op_term_t::~op_term_t() { }

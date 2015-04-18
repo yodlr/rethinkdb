@@ -74,7 +74,6 @@ void count_evals(test_rdb_env_t *test_env,
     count_callback_t callback(count_out);
     env_instance->get_env()->set_eval_callback(&callback);
 
-    ql::backtrace_registry_t bt_reg;
     ql::compile_env_t compile_env((ql::var_visibility_t()));
     counted_t<const ql::term_t> compiled_term = ql::compile_term(&compile_env, term);
 
@@ -93,7 +92,6 @@ void interrupt_test(test_rdb_env_t *test_env,
     interrupt_callback_t callback(interrupt_phase, env_instance.get());
     env_instance->get_env()->set_eval_callback(&callback);
 
-    ql::backtrace_registry_t bt_reg;
     ql::compile_env_t compile_env((ql::var_visibility_t()));
     counted_t<const ql::term_t> compiled_term = ql::compile_term(&compile_env, term);
 

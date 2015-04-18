@@ -1,6 +1,5 @@
 #include "rdb_protocol/func.hpp"
 
-#include "rdb_protocol/backtrace.hpp"
 #include "rdb_protocol/counted_term.hpp"
 #include "rdb_protocol/env.hpp"
 #include "rdb_protocol/minidriver.hpp"

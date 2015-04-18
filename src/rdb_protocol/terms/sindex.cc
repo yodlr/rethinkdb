@@ -4,7 +4,6 @@
 #include <string>
 
 #include "rdb_protocol/real_table.hpp"
-#include "rdb_protocol/backtrace.hpp"
 #include "rdb_protocol/btree.hpp"
 #include "rdb_protocol/error.hpp"
 #include "rdb_protocol/func.hpp"

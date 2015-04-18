@@ -6,7 +6,6 @@
 
 #include "concurrency/cross_thread_watchable.hpp"
 #include "extproc/js_runner.hpp"
-#include "rdb_protocol/backtrace.hpp"
 #include "rdb_protocol/counted_term.hpp"
 #include "rdb_protocol/func.hpp"
 #include "rdb_protocol/minidriver.hpp"

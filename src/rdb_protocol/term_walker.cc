@@ -1,8 +1,6 @@
 // Copyright 2010-2014 RethinkDB, all rights reserved.
 #include "rdb_protocol/term_walker.hpp"
 
-#include <algorithm>
-
 #include "rdb_protocol/backtrace.hpp"
 #include "rdb_protocol/error.hpp"
 #include "rdb_protocol/minidriver.hpp"

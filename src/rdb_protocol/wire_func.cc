@@ -4,7 +4,6 @@
 #include "containers/archive/boost_types.hpp"
 #include "containers/archive/stl_types.hpp"
 #include "containers/archive/archive.hpp"
-#include "rdb_protocol/backtrace.hpp"
 #include "rdb_protocol/env.hpp"
 #include "rdb_protocol/func.hpp"
 #include "rdb_protocol/protocol.hpp"
@@ -22,7 +21,6 @@ wire_func_t::wire_func_t(const counted_t<const func_t> &f) : func(f) {
 wire_func_t::wire_func_t(protob_t<const Term> body,
                          std::vector<sym_t> arg_names,
                          backtrace_id_t bt) {
-    // The dummy registry will ensure all sub-terms use this backtrace
     compile_env_t env(var_visibility_t().with_func_arg_name_list(arg_names));
     func = make_counted<reql_func_t>(bt, var_scope_t(), arg_names,
                                      compile_term(&env, body));

@@ -7,6 +7,7 @@
 #include "rdb_protocol/minidriver.hpp"
 #include "rdb_protocol/op.hpp"
 #include "rdb_protocol/pb_utils.hpp"
+#include "rdb_protocol/term_walker.hpp"
 
 namespace ql {
 
@@ -25,6 +26,7 @@ public:
                strprintf("Expected %s but found %d.",
                          argspec.print().c_str(), args_size));
         out->Swap(&rewrite(in, in).get());
+        propagate_backtrace(out.get(), backtrace());
 
         real = compile_term(env, out);
     }

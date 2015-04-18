@@ -4,7 +4,6 @@
 #include <utility>
 #include <vector>
 
-#include "rdb_protocol/backtrace.hpp"
 #include "rdb_protocol/error.hpp"
 #include "rdb_protocol/func.hpp"
 #include "rdb_protocol/minidriver.hpp"

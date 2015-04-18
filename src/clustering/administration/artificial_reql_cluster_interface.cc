@@ -142,7 +142,7 @@ bool artificial_reql_cluster_interface_t::table_estimate_doc_counts(
             /* We arbitrarily choose to read from the UUID version of the system table
             rather than the name version. */
             if (!it->second.second->read_all_rows_as_stream(
-                    ql::backtrace_id_t(),
+                    ql::backtrace_id_t::empty(),
                     ql::datum_range_t::universe(),
                     sorting_t::UNORDERED,
                     env->interruptor,
