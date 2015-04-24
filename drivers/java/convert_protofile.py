@@ -19,6 +19,7 @@ TEMPLATE_DIR = './templates'
 PROTO_DIR = PACKAGE_DIR + '/proto'
 PROTO_FILE = '../../src/rdb_protocol/ql2.proto'
 PROTO_JSON = './proto_basic.json'
+META_JSON = './term_info.json'
 
 
 def main():
@@ -26,6 +27,8 @@ def main():
     term_meta = get_term_metadata()
     render_enums(proto)
     render_rqlquery_class(term_meta)
+    new_json = diff_proto_keys(proto, term_meta)
+    write_term_metadata(new_json)
 
 
 def camel(varname):
@@ -65,8 +68,28 @@ def get_proto_def():
 
 def get_term_metadata():
     '''Gets some extra metadata needed to fully generate terms'''
-    with codecs.open('./term_info.json', "r", 'utf-8') as f:
+    with codecs.open(META_JSON, "r", 'utf-8') as f:
         return json.load(f, object_pairs_hook=OrderedDict)
+
+
+def write_term_metadata(term_meta):
+    with codecs.open(META_JSON, 'w', 'utf-8') as f:
+        json.dump(term_meta, f, indent=4)
+
+
+def diff_proto_keys(proto, term_meta):
+    '''Finds any new keys in the protobuf file and adds dummy entries
+    for them in the term_info.json dictionary'''
+    set_meta = set(term_meta.keys())
+    proto_items = proto['Term']['TermType']
+    diff = [x for x in proto_items.keys()
+            if x not in set_meta]
+    new = term_meta.copy()
+    for key in diff:
+        print "Got new term", key, "with id", proto_items[key],
+        print ".adding to metadata"
+        new[key] = OrderedDict({'id': proto_items[key]})
+    return new
 
 
 # Used in parsing protofile
@@ -148,6 +171,7 @@ def render(template_name, output_dir, output_name=None, **kwargs):
 
 
 def render_enums(proto):
+
     '''Render protocol enums'''
     render_enum("Version", proto["VersionDummy"]["Version"])
     render_enum("Protocol", proto["VersionDummy"]["Protocol"])
