@@ -8,7 +8,7 @@ usage () {
 }
 
 defaults () {
-    ssh_only_group=ssh-only
+    ssh_only_group=ssh-only-vpc
     ami_group=rethinkdb-cluster
     ssh_control_path='~/.ssh/master-%l-%r@%h:%p'
     ssh_user=ubuntu
@@ -18,7 +18,7 @@ defaults () {
     ssh_key_name=
 
     # See http://cloud-images.ubuntu.com/locator/ec2/ for a list of official Ubuntu AMI
-    base_ami=ami-8caa1ce4 # Ubuntu Trusty 14.04 amd64 ebs 20140927
+    base_ami=ami-cc3b3ea4 # Ubuntu Trusty 14.04 amd64 hvm:ebs-ssd 20150417
 }
 
 parseopts () {
@@ -27,6 +27,7 @@ parseopts () {
         shift
         case $arg in
             --ami-name) ami_name=$1; shift ;;
+            --vpc-subnet) vpc_subnet=$1; shift ;;
             *) die "Unknown argument $arg" ;;
         esac
     done
@@ -37,12 +38,15 @@ main () {
     parseopts "$@"
     check_env
     echo "Starting RethinkDB AMI creation process"
-    ensure_ssh_only_group
     local key
     key=$(find_usable_key)
     echo "Using key $key"
     local instance_id instance_address
-    launch_instance_ephemeral "$base_ami" "$ssh_only_group" t1.micro "$key" instance_id instance_address
+    find_vpc_subnet vpc subnet
+    echo "Using VPC subnet $subnet in VPC $vpc"
+    ssh_only_group_id=$(ensure_ssh_only_group "$vpc")
+    echo "Using security group $ssh_only_group_id"
+    launch_instance_ephemeral "$base_ami" "$ssh_only_group_id" t2.micro "$key" "$subnet" instance_id instance_address
 
     scp_to "$instance_address" "$setup_files" "/tmp/build-ami"
     run "$instance_address" 'cd /tmp/build-ami && sudo bash setup.sh'
@@ -50,13 +54,35 @@ main () {
 
     run "$instance_address" 'sudo bash -c "rm /root/.ssh/authorized_keys /home/*/.ssh/authorized_keys"'
 
-    # ensure_ami_group
+    # gid=$(ensure_ami_group "$vpc")
 
     echo "Creating AMI named $ami_name..."
 
     local ami_id
     create_rethinkdb_ami "$instance_id" ami_id
     at_exit echo "Created AMI $ami_id"
+}
+
+# find_vpc_subnet <&vpc_id> <&subnet_id>
+find_vpc_subnet () {
+    out_vpc=$1
+    out_subnet=$2
+    if [[ -n "${vpc_subnet:-}" ]]; then
+        ids="$vpc_subnet"
+    else
+        ids=$(ec2-describe-subnets | grep ^SUBNET | awk '{print$2":"$4}')
+        set -- $ids
+        if [[ "$#" = 0 ]]; then
+            die "no VPC subnets found. Please create one"
+        fi
+        if [[ "$#" != 1 ]]; then
+            echo "Multiple subnets found. Use the --vpc-subnet flag to select one:" >&2
+            printf "%s\n" "$@" >&2
+            die "aborting"
+        fi
+    fi
+    eval "$out_vpc=$(printf %q "$(echo "$ids" | cut -f 2 -d :)")"
+    eval "$out_subnet=$(printf %q "$(echo "$ids" | cut -f 1 -d :)")"
 }
 
 # stop_instance <id>
@@ -131,15 +157,16 @@ at_exit () {
     trap "$at_exit_cmds" EXIT
 }
 
-# exists_group <name>
+# exists_group <name> <vpc>
 exists_group () {
-    ec2-describe-group "$1" >/dev/null
+    line=$(ec2-describe-group | grep "$1" | grep "$2") \
+        && { echo "$line" | awk '{print$2}'; }
 }
 
-# create_group <name> <description>
+# create_group <name> <description> <vpc>
 create_group () {
     local out
-    out=$(ec2-create-group "$1" -d "$2")
+    out=$(ec2-create-group "$1" -d "$2" --vpc "$3")
     echo "$out" | cut -f 2
 }
 
@@ -158,29 +185,28 @@ group_authorize_group_id () {
     ec2-authorize "$1" -P tcp -p -1 -o "$2"
 }
 
+# ensure_ssh_only_group <vpc>
 ensure_ssh_only_group () {
-    if exists_group "$ssh_only_group"; then
-        echo "Using existing security group '$ssh_only_group'"
-    else
-        echo "Creating security group '$ssh_only_group'"
-        create_group "$ssh_only_group" "Only allow ssh (port 22)"
-        group_authorize_tcp_port "$ssh_only_group" 22
+    if ! exists_group "$ssh_only_group" "$1"; then
+        echo "Creating security group '$ssh_only_group'" >&2
+        group=$(create_group "$ssh_only_group" "Only allow ssh (port 22)" "$1")
+        group_authorize_tcp_port "$group" 22
+        echo "$group"
     fi
 }
 
+# ensure_ami_group <vpc>
 ensure_ami_group () {
-    if exists_group "$ami_group"; then
-        echo "Using existing security group '$ami_group'"
-    else
-        echo "Creating security group '$ami_group'"
+    if ! exists_group "$ami_group" "$1"; then
+        echo "Creating security group '$ami_group'" >&2
         local group_id
-        group_id=$(create_group "$ami_group" "RethinkDB Cluster")
-        group_authorize_tcp_port "$ami_group" 22
-        group_authorize_tcp_port "$ami_group" 80
-        group_authorize_tcp_port "$ami_group" 443
-        group_authorize_tcp_port "$ami_group" 28015
-        group_authorize_icmp "$ami_group"
-        group_authorize_group_id "$ami_group" "group_id"
+        group_id=$(create_group "$ami_group" "RethinkDB Cluster" "$1")
+        group_authorize_tcp_port "$group_id" 22
+        group_authorize_tcp_port "$group_id" 80
+        group_authorize_tcp_port "$group_id" 443
+        group_authorize_tcp_port "$group_id" 28015
+        group_authorize_icmp "$group_id"
+        group_authorize_group_id "$group_id" "group_id"
     fi
 }
 
@@ -216,11 +242,11 @@ find_usable_key () {
     return 1
 }
 
-# launch_instance_ephemeral <ami> <group> <machine> <key> [<&id> <&address>]
+# launch_instance_ephemeral <ami> <group> <machine> <key> <vpc> [<&id> <&address>]
 launch_instance_ephemeral () {
     echo "Launching base instance from ami $1 in group $2 on machine $3 with key $4"
     local out
-    out=$(ec2-run-instances "$1" -g "$2" -t "$3" -k "$4") || die "Failed to launch instance"
+    out=$(ec2-run-instances "$1" -g "$2" -t "$3" -k "$4" --subnet "$5") || die "Failed to launch instance: $out"
     local _instance_id
     _instance_id=$(echo "$out" | grep ^INSTANCE | cut -f 2)
     at_exit echo Terminating instance "$_instance_id"
@@ -232,7 +258,7 @@ launch_instance_ephemeral () {
         _instance_address=$(echo "$out" | grep ^INSTANCE | cut -f 4)
         local status
         status=$(echo "$out" | grep ^INSTANCE | cut -f 6)
-        echo "Instance status: $status"
+        echo "Instance status: $status (no public address available)"
         if test -n "$_instance_address"; then
             break
         else
@@ -240,8 +266,8 @@ launch_instance_ephemeral () {
         fi
     done
     start_ssh_master "$_instance_address"
-    eval "${5:-instance_id}=$(printf %q "$_instance_id")"
-    eval "${6:-instance_address}=$(printf %q "$_instance_address")"
+    eval "${6:-instance_id}=$(printf %q "$_instance_id")"
+    eval "${7:-instance_address}=$(printf %q "$_instance_address")"
 }
 
 # start_ssh_master <address> [<retries=20>] [<wait=5>]
