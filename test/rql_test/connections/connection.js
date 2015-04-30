@@ -4,18 +4,20 @@
 
 var assert = require('assert');
 var path = require('path');
-var fs = require('fs');
-var spawn = require('child_process').spawn
 
 // -- load rethinkdb from the proper location
 
 var r = require(path.resolve(__dirname, '..', 'importRethinkDB.js')).r;
 
-// -- get ENV inforamtion
+// -- settings
 
 var testDefault = process.env.TEST_DEFAULT_PORT == "1";
-var driverPort = process.env.RDB_DRIVER_PORT;
+var driverPort = process.env.RDB_DRIVER_PORT || 28015;
 var serverHost = process.env.RDB_SERVER_HOST || 'localhost';
+
+/// -- global variables
+
+var sharedConnection = null;
 
 // -- helper functions
 
@@ -42,11 +44,15 @@ var givesError = function(type, msg, done){
     };
 };
 
-var withConnection = function(f){
-    return function(done){
-        r.connect({host:serverHost, port:driverPort}, function(err, c){
-            assertNull(err);
-            f(done, c);
+var withConnection = function(fnct) {
+    return function(done) {
+        r.expr(1).run(sharedConnection).then(function() {
+            fnct(done, sharedConnection);
+        }).catch(function(err) {
+            r.connect({host:serverHost, port:driverPort}).then(function(conn) {
+                sharedConnection = conn;
+                fnct(done, sharedConnection);
+            }).catch(done)
         });
     };
 };
@@ -110,9 +116,24 @@ describe('Javascript connection API', function(){
     
     describe('With a server', function(){
         this.timeout(4000)
-        // TODO: test default port
         
-        describe('close twice and reconnect', function(){
+        it("functional connect", function(done) {
+            r.connect({host:serverHost, port:driverPort}, function(err, conn) {
+                try {
+                    assertNotNull(conn);
+                    assertNull(err);
+                    done();
+                } catch (err) {
+                    done(err);
+                }
+            });
+        });
+        
+        it("promise connect", function() {
+            return r.connect({host:serverHost, port:driverPort})
+        });
+        
+        describe('close twice and reconnect', function() {
             var simpleQuery = function(c) { return r(1).run(c); };
             
             it("noreplyWait=false", function(done) {
@@ -150,9 +171,9 @@ describe('Javascript connection API', function(){
             });
         })
         
-        it("fails to query after close", withConnection(function(done, c){
-            c.close({noreplyWait: false});
-            r(1).run(c, givesError("RqlDriverError", "Connection is closed.", done));
+        it("fails to query after close", withConnection(function(done, conn){
+            conn.close({noreplyWait: false});
+            r.expr(1).run(conn, givesError("RqlDriverError", "Connection is closed.", done));
         }));
         
         it("noreplyWait waits", withConnection(function(done, c){
