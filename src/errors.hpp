@@ -7,15 +7,15 @@
 #include <stdlib.h>
 
 #ifndef DISABLE_BREAKPOINTS
-#ifdef __linux__
+#if defined(__linux__)
 #if defined __i386 || defined __x86_64
+
 #define BREAKPOINT __asm__ volatile ("int3")
 #else   /* not x86/amd64 */
 #define BREAKPOINT (raise(SIGTRAP))
 #endif  /* x86/amd64 */
-#endif /* __linux__ */
 
-#ifdef __MACH__
+#elif defined(__MACH__) || defined(__CYGWIN__)
 #define BREAKPOINT (raise(SIGTRAP))
 #endif
 #else /* Breakpoints Disabled */

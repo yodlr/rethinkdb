@@ -3,6 +3,7 @@
 #define LOGGER_HPP_
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <string>
 
 enum log_level_t { log_level_debug = 0, log_level_info = 1, log_level_notice, log_level_warn, log_level_error };

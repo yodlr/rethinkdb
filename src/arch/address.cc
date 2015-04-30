@@ -391,7 +391,7 @@ int port_t::value() const {
 }
 
 std::string port_t::to_string() const {
-    return std::to_string(value_);
+    return strprintf("%d", value_);
 }
 
 ip_and_port_t::ip_and_port_t()

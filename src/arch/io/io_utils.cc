@@ -1,16 +1,20 @@
 // Copyright 2010-2012 RethinkDB, all rights reserved.
 #include "arch/io/io_utils.hpp"
 
-#include <sys/syscall.h>
+//#include <sys/syscall.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #include <string.h>
 
 #include "logger.hpp"
 
+#if !defined(__CYGWIN__)
+
 int _gettid() {
     return syscall(SYS_gettid);
 }
+
+#endif // defined(__CYGWIN__)
 
 fd_t scoped_fd_t::reset(fd_t f2) {
     if (fd != INVALID_FD) {

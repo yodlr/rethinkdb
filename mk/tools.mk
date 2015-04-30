@@ -23,7 +23,7 @@ $(ETAGSFILE): FORCE
 	rm -rf $@
 	touch $@
 	find $(TOP)/src \( -name \*.hpp -or -name \*.cc -or -name \*.tcc \) -print0 \
-	  | xargs -0 $(ETAGSPROG) -l c++ -a -o $@
+	  | xargs -0 $(ETAGSPROG) -a -o $@
 
 ##### cscope
 
