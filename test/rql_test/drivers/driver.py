@@ -1,7 +1,12 @@
 from __future__ import print_function
 
-import atexit, itertools, os, re, sys
+import atexit, itertools, os, re, sys, time
 from datetime import datetime, tzinfo, timedelta
+
+stashedPath = sys.path
+sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), os.path.pardir, os.path.pardir, 'common')))
+import driver, utils
+sys.path = stashedPath
 
 try:
     unicode
@@ -19,6 +24,12 @@ try:
     izip_longest = itertools.izip_longest
 except AttributeError:
     izip_longest = itertools.zip_longest
+
+# -- global variables
+
+failure_count = 0
+passed_count = 0
+start_time=time.time()
 
 # -- timezone objects
 
@@ -46,40 +57,42 @@ class PacificTimeZone(tzinfo):
     def dst(self, dt):
         return timedelta(0, 3600)
 
-# -- import test resources - NOTE: these are path dependent
+# -- import driver
 
-stashedPath = sys.path
-
-# - test_util - TODO: replace with methods from common
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-import test_util
-
-# - common
-
-sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), os.path.pardir, os.path.pardir, 'common')))
-import utils
 r = utils.import_python_driver()
+print('Using RethinkDB client from: %s' % r.__file__)
 
-# -
+# -- get settings
 
-sys.path = stashedPath
+DEBUG_ENABLED = os.environ.get('VERBOSE', 'false').lower() == 'true'
 
-# --
+def print_debug(message):
+    if DEBUG_ENABLED:
+        sys.stderr.write('DEBUG (%.2f):\t %s\n' % (time.time() - start_time, message.rstrip()))
 
-# JSPORT = int(sys.argv[1])
-CPPPORT = int(sys.argv[2])
-DB_AND_TABLE_NAME = sys.argv[3]
-CLUSTER_PORT = int(sys.argv[4])
-BUILD = sys.argv[5]
+DRIVER_PORT = int(sys.argv[1] if len(sys.argv) > 1 else os.environ.get('RDB_DRIVER_PORT'))
+print_debug('Using driver port: %d' % DRIVER_PORT)
+
+required_external_tables = []
+if len(sys.argv) > 2 or os.environ.get('TEST_DB_AND_TABLE_NAME'):
+    for rawValue in (sys.argv[2] if len(sys.argv) > 3 else os.environ.get('TEST_DB_AND_TABLE_NAME')).split(','):
+        rawValue = rawValue.strip()
+        if rawValue == '':
+            continue
+        splitValue = rawValue.split('.')
+        if len(splitValue) == 1:
+            required_external_tables += [('test', splitValue[0])]
+        elif len(splitValue) == 2:
+            required_external_tables += [(splitValue[0], splitValue[1])]
+        else:
+            raise AssertionError('Unuseable value for external tables: %s' % rawValue)
+required_external_tables.reverse() # setup for .pop()
 
 # -- utilities --
 
-failure_count = 0
-
 def print_test_failure(test_name, test_src, message):
     global failure_count
-    failure_count = failure_count + 1
+    failure_count += 1
     print('')
     print("TEST FAILURE: %s" % test_name.encode('utf-8'))
     print("TEST BODY:    %s" % test_src.encode('utf-8'))
@@ -97,7 +110,7 @@ def check_pp(src, query):
     #    print("Printed query: %s", composed)
 
 class Lst:
-    def __init__(self, lst, **kwargs):
+    def __init__(self, lst, partial=None, **kwargs):
         self.lst = lst
         self.kwargs = kwargs
 
@@ -107,7 +120,7 @@ class Lst:
 
         for otherItem, selfItem in izip_longest(other, self.lst, fillvalue=self.__class__):
             if self.__class__ in (otherItem, selfItem):
-                return False # mistmatched lengths
+                return False # mismatched lengths
             if not eq(selfItem, **self.kwargs)(otherItem):
                 return False
 
@@ -117,37 +130,58 @@ class Lst:
         return repr(self.lst)
 
 class Bag(Lst):
-    def __init__(self, lst, **kwargs):
+    
+    # note: This only works for dicts, arrays, numbers, Nones, and strings. Anything else might as well be random.
+
+    def __init__(self, lst, partial=False, **kwargs):
         self.lst = sorted(lst, key=lambda x: repr(x))
+        self.partial = partial == True
         self.kwargs = kwargs
 
     def __eq__(self, other):
         if not hasattr(other, '__iter__'):
             return False
-
+        
         other = sorted(other, key=lambda x: repr(x))
-
-        if len(self.lst) != len(other):
-            return False
-
-        for a, b in zip(self.lst, other):
-            if not eq(a, **self.kwargs)(b):
+        
+        if self.partial:
+            if len(self.lst) > len(other):
                 return False
-
+            
+            otherIter = iter(other)
+            for mine in self.lst:
+                for theirs in otherIter:
+                    if eq(mine, **self.kwargs)(theirs):
+                        break
+                else:
+                    return False
+        else:
+            if len(self.lst) != len(other):
+                return False
+        
+            for a, b in zip(self.lst, other):
+                if not eq(a, **self.kwargs)(b):
+                    return False
+        
         return True
 
 class Dct:
-    def __init__(self, dct, **kwargs):
+    def __init__(self, dct, partial=False, **kwargs):
         assert isinstance(dct, dict)
         self.dct = dct
+        self.partial = partial == True
         self.kwargs = kwargs
 
     def __eq__(self, other):
         if not isinstance(other, dict):
             return False
         
-        if not set(self.keys()) == set(other.keys()):
-            return False
+        if self.partial is True:
+            if not set(self.keys()).issubset(set(other.keys())):
+                return False
+        else:
+            if not set(self.keys()) == set(other.keys()):
+                return False
         
         for key in self.dct:
             if not key in other:
@@ -206,7 +240,7 @@ class Err:
 
 
 class Arr:
-    def __init__(self, length, thing=None, **kwargs):
+    def __init__(self, length, thing=None, partial=None, **kwargs):
         self.length = length
         self.thing = thing
         self.kwargs = kwargs
@@ -278,23 +312,23 @@ class PyTestDriver:
     cpp_conn = None
     
     def __init__(self):
-        print('Creating default connection to CPP server on port %s\n' % str(CPPPORT))
+        print('Creating default connection to server on port %d\n' % DRIVER_PORT)
         self.cpp_conn = self.connect()
-        self.scope = {}
-        
-        if 'test' not in r.db_list().run(self.cpp_conn):
-            r.db_create('test').run(self.cpp_conn)
+        self.scope = globals()
     
     def connect(self):
-        return r.connect(host='localhost', port=CPPPORT)
+        return r.connect(host='localhost', port=DRIVER_PORT)
 
-    def define(self, expr):
+    def define(self, expr, variable):
+        print_debug('Defining: %s%s' % (expr, ' to %s' % variable if variable else ''))
         try:
-            exec(expr, globals(), self.scope)
+            exec(compile('%s = %s' % (variable, expr), '<string>', 'single'), self.scope) # handle things like: a['b'] = b
         except Exception as e:
             print_test_failure('Exception while processing define', expr, str(e))
-
+    
     def run(self, src, expected, name, runopts, testopts):
+        global passed_count
+        
         if runopts:
             runopts["profile"] = True
         else:
@@ -310,57 +344,71 @@ class PyTestDriver:
         else:
             conn = self.cpp_conn
         
-        # Try to build the expected result
+        # -- build the expected result
+        
         if expected:
-            exp_val = eval(expected, dict(list(globals().items()) + list(self.scope.items())))
+            exp_val = eval(expected, self.scope)
         else:
             # This test might not have come with an expected result, we'll just ensure it doesn't fail
             exp_val = ()
         
-        # Run the test
-        if 'reql-query' in testopts and str(testopts['reql-query']).lower() == 'false':
-            try:
-                result = eval(src, globals(), self.scope)
-            except Exception as err:
-                result = err
-        else:
-            # Try to build the test
-            try:
-                query = eval(src, dict(list(globals().items()) + list(self.scope.items())))
-            except Exception as err:
-                if not isinstance(exp_val, Err):
-                    print_test_failure(name, src, "Error eval'ing test src:\n\t%s" % repr(err))
-                elif not eq(exp_val, **compOptions)(err):
-                    print_test_failure(name, src, "Error eval'ing test src not equal to expected err:\n\tERROR: %s\n\tEXPECTED: %s" % (repr(err), repr(exp_val)))
-    
-                return # Can't continue with this test if there is no test query
-    
-            # Check pretty-printing
-            check_pp(src, query)
-    
-            # Run the test
-            result = None
-            try:
-                result = query.run(conn, **runopts)
+        # -- evaluate the command
+        
+        try:
+            result = eval(src, self.scope)
+            
+            # - collect the contents of a cursor
+            
+            if isinstance(result, r.Cursor):
+                print_debug('Evaluating cursor: %s %r' % (src, runopts))
+                result = list(result)
+            
+            # - run as a query if it is one
+            
+            elif isinstance(result, r.RqlQuery):
+                print_debug('Running query: %s %r' % (src, runopts))
+                
+                # Check pretty-printing
+                
+                check_pp(src, result)
+                
+                # run the query
+                
+                result = result.run(conn, **runopts)
                 if result and "profile" in runopts and runopts["profile"] and "value" in result:
                     result = result["value"]
-            except Exception as err:
-                result = err
+                # ToDo: do something reasonable with the profile
+            
+            else:
+                print_debug('Running: %s' % src)
+            
+            # - Save variable if requested
+            
+            if 'variable' in testopts:
+                # ToDo: handle complex variables like: a[2]
+                self.scope[testopts['variable']] = result
+                if exp_val is None:
+                    return
+
+            if 'noreply_wait' in testopts and testopts['noreply_wait']:
+                conn.noreply_wait()
         
-        # Save variable if requested
-        
-        if 'variable' in testopts:
-            self.scope[testopts['variable']] = result
+        except Exception as err:
+            result = err
         
         # Compare to the expected result
         
         if isinstance(result, Exception):
             if not isinstance(exp_val, Err):
-                print_test_failure(name, src, "Error running test on CPP server:\n\t%s %s" % (repr(result), str(result)))
+                print_test_failure(name, src, "Error running test on server:\n\t%s %s" % (str(result), str(result)))
             elif not eq(exp_val, **compOptions)(result):
-                print_test_failure(name, src, "Error running test on CPP server not equal to expected err:\n\tERROR: %s\n\tEXPECTED: %s" % (repr(result), repr(exp_val)))
+                print_test_failure(name, src, "Error running test on server not equal to expected err:\n\tERROR: %s\n\tEXPECTED: %s" % (str(result), str(exp_val)))
+            else:
+                passed_count += 1
         elif not eq(exp_val, **compOptions)(result):
-            print_test_failure(name, src, "CPP result is not equal to expected result:\n\tVALUE: %s\n\tEXPECTED: %s" % (repr(result), repr(exp_val)))
+            print_test_failure(name, src, "Result is not equal to expected result:\n\tVALUE: %s\n\tEXPECTED: %s" % (str(result), str(exp_val)))
+        else:
+            passed_count += 1
 
 driver = PyTestDriver()
 
@@ -382,37 +430,81 @@ def test(query, expected, name, runopts=None, testopts=None):
         expected = None
     driver.run(query, expected, name, runopts, testopts)
 
-# Generated code must call either `setup_table()` or `check_no_table_specified()`
-def setup_table(table_variable_name, table_name):
-    def _teardown_table():
-        if DB_AND_TABLE_NAME == "no_table_specified":
-            res = r.db("test").table_drop(table_name).run(driver.cpp_conn)
-            assert res == {"dropped": 1}
-        else:
-            db, table = DB_AND_TABLE_NAME.split(".")
-            res = r.db(db).table(table).delete().run(driver.cpp_conn)
-            assert res["errors"] == 0
-            res = r.db(db).table(table).index_list().for_each(
-                r.db(db).table(table).index_drop(r.row)).run(driver.cpp_conn)
-            assert "errors" not in res or res["errors"] == 0
-    atexit.register(_teardown_table)
-    if DB_AND_TABLE_NAME == "no_table_specified":
-        res = r.db("test").table_create(table_name).run(driver.cpp_conn)
-        assert res == {"created": 1}
-        globals()[table_variable_name] = r.db("test").table(table_name)
+def setup_table(table_variable_name, table_name, db_name='test'):
+    global required_external_tables
+    
+    def _teardown_table(table_name, db_name):
+        '''Used for tables that get created for this test'''
+        res = r.db(db_name).table_drop(table_name).run(driver.cpp_conn)
+        assert res["tables_dropped"] == 1, 'Failed to delete table %s.%s: %s' % (db_name, table_name, str(res))
+    
+    def _clean_table(table_name, db_name):
+        '''Used for pre-existing tables'''
+        res = r.db(db_name).table(table_name).delete().run(driver.cpp_conn)
+        assert res["errors"] == 0, 'Failed to clean out contents from table %s.%s: %s' % (db_name, table_name, str(res))
+        r.db(db_name).table(table_name).index_list().for_each(r.db(db_name).table(table_name).index_drop(r.row)).run(driver.cpp_conn)
+    
+    if len(required_external_tables) > 0:
+        db_name, table_name = required_external_tables.pop()
+        try:
+            r.db(db_name).table(table_name).info(driver.cpp_conn)
+        except r.RqlRuntimeError:
+            raise AssertionError('External table %s.%s did not exist' % (db_name, table_name))
+        atexit.register(_clean_table, table_name=table_name, db_name=db_name)
+        
+        print('Using existing table: %s.%s, will be %s' % (db_name, table_name, table_variable_name))
     else:
-        db, table = DB_AND_TABLE_NAME.split(".")
-        globals()[table_variable_name] = r.db(db).table(table)
+        if table_name in r.db(db_name).table_list().run(driver.cpp_conn):
+            r.db(db_name).table_drop(table_name).run(driver.cpp_conn)
+        res = r.db(db_name).table_create(table_name).run(driver.cpp_conn)
+        assert res["tables_created"] == 1, 'Unable to create table %s.%s: %s' % (db_name, table_name, str(res))
+        r.db(db_name).table(table_name).wait().run(driver.cpp_conn)
+        
+        print_debug('Created table: %s.%s, will be %s' % (db_name, table_name, table_variable_name))
+    
+    globals()[table_variable_name] = r.db(db_name).table(table_name)
+
+def setup_table_check():
+    '''Make sure that the required tables have been setup'''
+    if len(required_external_tables) > 0:
+        raise Exception('Unused external tables, that is probably not supported by this test: %s' % ('%s.%s' % tuple(x) for x in required_external_tables).join(', '))
 
 def check_no_table_specified():
     if DB_AND_TABLE_NAME != "no_table_specified":
         raise ValueError("This test isn't meant to be run against a specific table")
 
-def define(expr):
-    driver.define(expr)
+def define(expr, variable=None):
+    driver.define(expr, variable=variable)
 
 def bag(lst):
     return Bag(lst)
+
+def partial(expected):
+    if hasattr(expected, 'keys'):
+        return Dct(expected, partial=True)
+    elif hasattr(expected, '__iter__'):
+        return Bag(expected, partial=True)
+    else:
+        raise ValueError('partial can only work on dicts or iterables, got: %s (%s)' % (type(expected).__name__, str(expected)))
+
+def fetch(cursor, limit=None):
+    '''Pull items from a cursor'''
+    if limit is not None:
+        try:
+            limit = int(limit)
+            assert limit > 0
+        except Exception:
+            "On fetch limit must be None or > 0, got: %s" % str(limit)
+    result = []
+    for i, value in enumerate(cursor, start=1):
+        result.append(value)
+        if i >= limit:
+            break
+    return result
+
+def wait(seconds):
+    '''Sleep for some seconds'''
+    time.sleep(seconds)
 
 def err(err_type, err_msg=None, frames=None):
     return Err(err_type, err_msg, frames)
@@ -426,9 +518,6 @@ def arrlen(length, thing=None):
 def uuid():
     return Uuid()
 
-def shard(table_name):
-    test_util.shard_table(CLUSTER_PORT, BUILD, table_name)
-
 def int_cmp(expected_value):
     return Number(expected_value, explicit_type=(int, long))
 
@@ -436,9 +525,10 @@ def float_cmp(expected_value):
     return Number(expected_value, explicit_type=float)
 
 def the_end():
-    global failure_count
     if failure_count > 0:
-        sys.exit("Failed %d tests" % failure_count)
+        sys.exit("Failed %d tests, passed %d" % (failure_count, passed_count))
+    else:
+        print("Passed all %d tests" % passed_count)
 
 false = False
 true = True

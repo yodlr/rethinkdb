@@ -21,23 +21,30 @@ const size_t LRU_CACHE_SIZE = 1000;
 
 namespace ql {
 
-datum_t static_optarg(const std::string &key, protob_t<Query> q) {
+datum_t static_optarg(const std::string &key, const protob_t<const Query> q) {
     // need to parse these to figure out what user wants; resulting
     // bootstrap problem is a headache.  Just use default.
     const configured_limits_t limits;
     for (int i = 0; i < q->global_optargs_size(); ++i) {
         const Query::AssocPair &ap = q->global_optargs(i);
         if (ap.key() == key && ap.val().type() == Term_TermType_DATUM) {
-            return to_datum(&ap.val().datum(), limits);
+            return to_datum(&ap.val().datum(), limits, reql_version_t::LATEST);
         }
     }
 
     return datum_t();
 }
 
+bool is_noreply(const protob_t<const Query> &q) {
+    ql::datum_t noreply = static_optarg("noreply", q);
+    return noreply.has() &&
+           noreply.get_type() == ql::datum_t::type_t::R_BOOL &&
+           noreply.as_bool();
+}
+
 wire_func_t construct_optarg_wire_func(const Term &val) {
     protob_t<Term> arg = r::fun(r::expr(val)).release_counted();
-    propagate_backtrace(arg.get(), &val.GetExtension(ql2::extension::backtrace));
+    propagate_backtrace(arg.get(), backtrace_id_t::empty());
 
     compile_env_t empty_compile_env((var_visibility_t()));
     counted_t<func_term_t> func_term
@@ -46,14 +53,8 @@ wire_func_t construct_optarg_wire_func(const Term &val) {
     return wire_func_t(func);
 }
 
-std::map<std::string, wire_func_t> global_optargs(protob_t<Query> q) {
-    rassert(q.has());
-
-    Term *t = q->mutable_query();
-    preprocess_term(t);
-
+std::map<std::string, wire_func_t> parse_global_optargs(protob_t<Query> q) {
     std::map<std::string, wire_func_t> optargs;
-
     for (int i = 0; i < q->global_optargs_size(); ++i) {
         const Query::AssocPair &ap = q->global_optargs(i);
         auto insert_res
@@ -69,8 +70,6 @@ std::map<std::string, wire_func_t> global_optargs(protob_t<Query> q) {
     // Supply a default db of "test" if there is no "db" optarg.
     if (!optargs.count("db")) {
         Term arg = r::db("test").get();
-        Backtrace *t_bt = t->MutableExtension(ql2::extension::backtrace);
-        propagate_backtrace(&arg, t_bt); // duplicate toplevel backtrace
         optargs["db"] = construct_optarg_wire_func(arg);
     }
 
@@ -142,13 +141,16 @@ scoped_ptr_t<profile::trace_t> maybe_make_profile_trace(profile_bool_t profile) 
         : scoped_ptr_t<profile::trace_t>();
 }
 
-env_t::env_t(rdb_context_t *ctx, signal_t *_interruptor,
+env_t::env_t(rdb_context_t *ctx,
+             return_empty_normal_batches_t _return_empty_normal_batches,
+             signal_t *_interruptor,
              std::map<std::string, wire_func_t> optargs,
              profile::trace_t *_trace)
     : global_optargs_(std::move(optargs)),
       limits_(from_optargs(ctx, _interruptor, &global_optargs_)),
       reql_version_(reql_version_t::LATEST),
-      cache_(LRU_CACHE_SIZE),
+      regex_cache_(LRU_CACHE_SIZE),
+      return_empty_normal_batches(_return_empty_normal_batches),
       interruptor(_interruptor),
       trace(_trace),
       evals_since_yield_(0),
@@ -160,10 +162,13 @@ env_t::env_t(rdb_context_t *ctx, signal_t *_interruptor,
 
 
 // Used in constructing the env for rdb_update_single_sindex and many unit tests.
-env_t::env_t(signal_t *_interruptor, reql_version_t reql_version)
+env_t::env_t(signal_t *_interruptor,
+             return_empty_normal_batches_t _return_empty_normal_batches,
+             reql_version_t reql_version)
     : global_optargs_(),
       reql_version_(reql_version),
-      cache_(LRU_CACHE_SIZE),
+      regex_cache_(LRU_CACHE_SIZE),
+      return_empty_normal_batches(_return_empty_normal_batches),
       interruptor(_interruptor),
       trace(NULL),
       evals_since_yield_(0),
@@ -191,6 +196,5 @@ void env_t::maybe_yield() {
         coro_t::yield();
     }
 }
-
 
 } // namespace ql

@@ -2,7 +2,6 @@
 #include <algorithm>
 
 #include "btree/keys.hpp"
-#include "clustering/reactor/namespace_interface.hpp"
 #include "concurrency/fifo_checker.hpp"
 #include "containers/counted.hpp"
 #include "debug.hpp"
@@ -19,6 +18,7 @@
 #include "rdb_protocol/minidriver.hpp"
 #include "rdb_protocol/protocol.hpp"
 #include "rdb_protocol/shards.hpp"
+#include "rdb_protocol/store.hpp"
 #include "stl_utils.hpp"
 #include "unittest/rdb_protocol.hpp"
 #include "unittest/unittest_utils.hpp"
@@ -154,30 +154,26 @@ void insert_data(namespace_interface_t *nsi,
 
 void prepare_namespace(namespace_interface_t *nsi,
                        order_source_t *osource,
+                       const std::vector<scoped_ptr_t<store_t> > *stores,
                        const std::vector<datum_t> &data) {
     // Create an index
     std::string index_id = "geo";
 
     const ql::sym_t arg(1);
     ql::protob_t<const Term> mapping = ql::r::var(arg).release_counted();
-    ql::map_wire_func_t m(mapping, make_vector(arg), get_backtrace(mapping));
+    sindex_config_t sindex(
+        ql::map_wire_func_t(mapping, make_vector(arg), ql::backtrace_id_t::empty()),
+        reql_version_t::LATEST,
+        sindex_multi_bool_t::SINGLE,
+        sindex_geo_bool_t::GEO);
 
-    write_t write(sindex_create_t(index_id, m, sindex_multi_bool_t::SINGLE,
-                                  sindex_geo_bool_t::GEO),
-                  profile_bool_t::PROFILE, ql::configured_limits_t());
-    write_response_t response;
-
-    cond_t interruptor;
-    nsi->write(write, &response,
-               osource->check_in("unittest::prepare_namespace(geo_indexes.cc"),
-               &interruptor);
-
-    if (!boost::get<sindex_create_response_t>(&response.response)) {
-        ADD_FAILURE() << "got wrong type of result back";
+    cond_t non_interruptor;
+    for (const auto &store : *stores) {
+        store->sindex_create(index_id, sindex, &non_interruptor);
     }
 
     // Wait for it to become ready
-    wait_for_sindex(nsi, osource, index_id);
+    wait_for_sindex(stores, index_id);
 
     // Insert the test data
     insert_data(nsi, osource, data);
@@ -280,7 +276,10 @@ void test_get_nearest(lon_lat_point_t center,
     }
 }
 
-void run_get_nearest_test(namespace_interface_t *nsi, order_source_t *osource) {
+void run_get_nearest_test(
+        namespace_interface_t *nsi,
+        order_source_t *osource,
+        const std::vector<scoped_ptr_t<store_t> > *stores) {
     // To reproduce a known failure: initialize the rng seed manually.
     const int rng_seed = randint(INT_MAX);
     debugf("Using RNG seed %i\n", rng_seed);
@@ -288,7 +287,7 @@ void run_get_nearest_test(namespace_interface_t *nsi, order_source_t *osource) {
 
     const size_t num_docs = 500;
     std::vector<datum_t> data = generate_data(num_docs, &rng);
-    prepare_namespace(nsi, osource, data);
+    prepare_namespace(nsi, osource, stores, data);
 
     try {
         const int num_runs = 20;
@@ -310,13 +309,16 @@ std::vector<datum_t> perform_get_intersecting(
 
     std::string table_name = "test_table"; // This is just used to print error messages
     std::string idx_name = "geo";
-    read_t read(intersecting_geo_read_t(region_t::universe(),
+    read_t read(intersecting_geo_read_t(boost::optional<changefeed_stamp_t>(),
+                                        region_t::universe(),
                                         std::map<std::string, ql::wire_func_t>(),
                                         table_name, ql::batchspec_t::all(),
                                         std::vector<ql::transform_variant_t>(),
                                         boost::optional<ql::terminal_variant_t>(),
-                                        sindex_rangespec_t(idx_name, region_t::universe(),
-                                                           datum_range_t::universe()),
+                                        sindex_rangespec_t(
+                                            idx_name,
+                                            region_t::universe(),
+                                            ql::datum_range_t::universe()),
                                         query_geometry),
                 profile_bool_t::PROFILE);
     read_response_t response;
@@ -385,7 +387,10 @@ void test_get_intersecting(const datum_t &query_geometry,
     }
 }
 
-void run_get_intersecting_test(namespace_interface_t *nsi, order_source_t *osource) {
+void run_get_intersecting_test(
+        namespace_interface_t *nsi,
+        order_source_t *osource,
+        const std::vector<scoped_ptr_t<store_t> > *stores) {
     // To reproduce a known failure: initialize the rng seed manually.
     const int rng_seed = randint(INT_MAX);
     debugf("Using RNG seed %i\n", rng_seed);
@@ -393,7 +398,7 @@ void run_get_intersecting_test(namespace_interface_t *nsi, order_source_t *osour
 
     const size_t num_docs = 500;
     std::vector<datum_t> data = generate_data(num_docs, &rng);
-    prepare_namespace(nsi, osource, data);
+    prepare_namespace(nsi, osource, stores, data);
 
     try {
         const int num_point_runs = 10;

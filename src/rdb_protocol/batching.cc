@@ -6,6 +6,8 @@
 #include "rdb_protocol/env.hpp"
 #include "rdb_protocol/error.hpp"
 
+#include "debug.hpp"
+
 namespace ql {
 
 static const int64_t DEFAULT_MIN_ELS = 8;
@@ -16,16 +18,13 @@ static const int64_t DEFAULT_MAX_DURATION = 500 * 1000;
 // These numbers are sort of arbitrary, but they seem to work. See `scale_down()`
 // for an explanation.
 static const int64_t DIVISOR_SCALING_FACTOR = 8;
-static const int64_t SCALE_CONSTANT = 8;
-
-RDB_IMPL_SERIALIZABLE_7_FOR_CLUSTER(batchspec_t,
-                                    batch_type,
-                                    min_els,
-                                    max_els,
-                                    max_size,
-                                    first_scaledown_factor,
-                                    max_dur,
-                                    start_time);
+#ifndef NDEBUG
+// Make sure that `with_at_most` followed by `scale_down` sometimes undersizes
+// batches in debug mode so that we can test `batchspec_t::all()` logic.
+static const int64_t SCALE_CONSTANT = 0;
+#else
+static const int64_t SCALE_CONSTANT = 32;
+#endif // NDEBUG
 
 batchspec_t::batchspec_t(
     batch_type_t _batch_type,
@@ -66,7 +65,7 @@ batchspec_t batchspec_t::all() {
                        std::numeric_limits<decltype(batchspec_t().max_els)>::max(),
                        std::numeric_limits<decltype(batchspec_t().max_size)>::max(),
                        1,
-                       0,
+                       0,  // Ignored when batch_type is TERMINAL.
                        current_microtime());
 }
 
@@ -81,10 +80,13 @@ static bool set_if_present(const char *argname, env_t *env, datum_t * dest) {
 }
 
 batchspec_t batchspec_t::user(batch_type_t batch_type, env_t *env) {
-    const int64_t SECS_TO_USECS = 1000 * 1000;
+    const double SECS_TO_USECS = 1000 * 1000;
+    // Kind of arbitrarily set to 1 day, but makes sure we don't overflow when
+    // casting from double to int64_t
+    const double MAX_BATCH_SECONDS = 60 * 60 * 24;
     datum_t max_els_d, min_els_d, max_size_d, max_dur_d;
     datum_t first_scaledown_d;
-    
+
     set_if_present("min_batch_rows", env, &min_els_d);
     set_if_present("max_batch_rows", env, &max_els_d);
     set_if_present("max_batch_bytes", env, &max_size_d);
@@ -92,7 +94,7 @@ batchspec_t batchspec_t::user(batch_type_t batch_type, env_t *env) {
     // in microseconds, so a scaling operation will be necessary.
     set_if_present("max_batch_seconds", env, &max_dur_d);
     set_if_present("first_batch_scaledown_factor", env, &first_scaledown_d);
-    
+
     int64_t max_els = max_els_d.has()
                       ? max_els_d.as_int()
                       : std::numeric_limits<decltype(batchspec_t().max_els)>::max();
@@ -103,9 +105,26 @@ batchspec_t batchspec_t::user(batch_type_t batch_type, env_t *env) {
     int64_t first_sd = first_scaledown_d.has()
                        ? first_scaledown_d.as_int()
                        : DEFAULT_FIRST_SCALEDOWN;
-    int64_t max_dur = max_dur_d.has()
-                       ? (max_dur_d.as_int() * SECS_TO_USECS)
-                       : DEFAULT_MAX_DURATION;
+    int64_t max_dur = DEFAULT_MAX_DURATION;
+    if (max_dur_d.has()) {
+        rcheck_target(
+            &max_dur_d,
+            max_dur_d.as_num() < MAX_BATCH_SECONDS,
+            base_exc_t::GENERIC,
+            strprintf("max_batch_seconds is too large (got `%"
+                      PR_RECONSTRUCTABLE_DOUBLE "`, must be less than %"
+                      PR_RECONSTRUCTABLE_DOUBLE ").",
+                      max_dur_d.as_num(), MAX_BATCH_SECONDS));
+        rcheck_target(
+            &max_dur_d,
+            max_dur_d.as_num() >= 0.0,
+            base_exc_t::GENERIC,
+            strprintf("max_batch_seconds must be positive (got `%"
+                      PR_RECONSTRUCTABLE_DOUBLE "`).",
+                      max_dur_d.as_num()));
+
+        max_dur = static_cast<int64_t>(max_dur_d.as_num() * SECS_TO_USECS);
+    }
     // Protect the user in case they're a dork.  Normally we would do rfail and
     // trigger exceptions, but due to NOTHROWs above this may not be safe.
     min_els = std::min<int64_t>(min_els, max_els);
@@ -121,6 +140,11 @@ batchspec_t batchspec_t::user(batch_type_t batch_type, env_t *env) {
 batchspec_t batchspec_t::with_new_batch_type(batch_type_t new_batch_type) const {
     return batchspec_t(new_batch_type, min_els, max_els, max_size,
                        first_scaledown_factor, max_dur, start_time);
+}
+
+batchspec_t batchspec_t::with_max_dur(int64_t new_max_dur) const {
+    return batchspec_t(batch_type, min_els, max_els, max_size,
+                       first_scaledown_factor, new_max_dur, start_time);
 }
 
 batchspec_t batchspec_t::with_at_most(uint64_t _max_els) const {
@@ -162,7 +186,8 @@ batchspec_t batchspec_t::scale_down(int64_t divisor) const {
             : std::min(max_size, (max_size * DIVISOR_SCALING_FACTOR
                                   / ((DIVISOR_SCALING_FACTOR - 1) * divisor))
                                  + SCALE_CONSTANT);
-    // to avoid problems when the batches get really tiny, we clamp new_max_els to be at least min_els.
+    // to avoid problems when the batches get really tiny, we clamp new_max_els
+    // to be at least min_els.
     new_max_els = std::max(min_els, new_max_els);
 
     return batchspec_t(batch_type, min_els, new_max_els, new_max_size,
@@ -186,23 +211,85 @@ batcher_t batchspec_t::to_batcher() const {
             : std::max<int64_t>(1, max_size / first_scaledown_factor);
     microtime_t cur_time = current_microtime();
     microtime_t end_time;
-    if (batch_type == batch_type_t::NORMAL) {
+    switch (batch_type) {
+    case batch_type_t::NORMAL:
         end_time = std::max(cur_time + (cur_time - start_time), start_time + max_dur);
-    } else if (batch_type == batch_type_t::NORMAL_FIRST) {
+        break;
+    case batch_type_t::NORMAL_FIRST:
         end_time = std::max(start_time + (max_dur / first_scaledown_factor),
                             cur_time + (max_dur / (first_scaledown_factor * 2)));
-    } else {
+        break;
+    case batch_type_t::SINDEX_CONSTANT: // fallthru
+    case batch_type_t::TERMINAL:
         end_time = std::numeric_limits<decltype(end_time)>::max();
+        break;
+    default: unreachable();
     }
     return batcher_t(batch_type, real_min_els, real_max_els, real_max_size, end_time);
 }
 
-bool batcher_t::should_send_batch() const {
-    // We ignore size_left as long as we have not got at least `min_wanted_els`
-    // documents.
+template<cluster_version_t W>
+void serialize(write_message_t *wm, const batchspec_t &batchspec) {
+    static_assert(
+        W == cluster_version_t::CLUSTER,
+        "Tried to serialize `batchspec_t` for a version different than `CLUSTER`");
+
+    serialize<W>(wm, batchspec.batch_type);
+    serialize<W>(wm, batchspec.min_els);
+    serialize<W>(wm, batchspec.max_els);
+    serialize<W>(wm, batchspec.max_size);
+    serialize<W>(wm, batchspec.first_scaledown_factor);
+    serialize<W>(wm, batchspec.max_dur);
+
+    // Here we serialize the duration instead of the `start_time` to account for
+    // clocks being out of sync between machines.
+    microtime_t current_time = current_microtime();
+    static_assert(sizeof(uint64_t) >= sizeof(microtime_t),
+                  "Incorrect type for duration, it might overflow");
+    uint64_t duration = current_time - std::min(batchspec.start_time, current_time);
+    serialize<W>(wm, duration);
+}
+INSTANTIATE_SERIALIZE_FOR_CLUSTER(batchspec_t);
+
+template<cluster_version_t W>
+archive_result_t deserialize(read_stream_t *s, batchspec_t *batchspec) {
+    static_assert(
+        W == cluster_version_t::CLUSTER,
+        "Tried to serialize `batchspec_t` for a version different than `CLUSTER`");
+
+    archive_result_t res = archive_result_t::SUCCESS;
+
+    res = deserialize<W>(s, deserialize_deref(batchspec->batch_type));
+    if (bad(res)) { return res; }
+    res = deserialize<W>(s, deserialize_deref(batchspec->min_els));
+    if (bad(res)) { return res; }
+    res = deserialize<W>(s, deserialize_deref(batchspec->max_els));
+    if (bad(res)) { return res; }
+    res = deserialize<W>(s, deserialize_deref(batchspec->max_size));
+    if (bad(res)) { return res; }
+    res = deserialize<W>(s, deserialize_deref(batchspec->first_scaledown_factor));
+    if (bad(res)) { return res; }
+    res = deserialize<W>(s, deserialize_deref(batchspec->max_dur));
+    if (bad(res)) { return res; }
+
+    uint64_t duration = 0;
+    static_assert(sizeof(uint64_t) >= sizeof(microtime_t),
+                  "Incorrect type for duration, it might overflow");
+    res = deserialize<W>(s, &duration);
+    if (bad(res)) { return res; }
+    batchspec->start_time = current_microtime() - duration;
+
+    return res;
+}
+INSTANTIATE_DESERIALIZE_FOR_CLUSTER(batchspec_t);
+
+bool batcher_t::should_send_batch(ignore_latency_t ignore_latency) const {
+    // We ignore `size_left` as long as we have not got at least
+    // `min_wanted_els` documents.
     return els_left <= 0
         || (size_left <= 0 && min_els_left <= 0)
-        || (current_microtime() >= end_time && seen_one_el);
+        || (ignore_latency == ignore_latency_t::NO
+            && (current_microtime() >= end_time && seen_one_el));
 }
 
 batcher_t::batcher_t(

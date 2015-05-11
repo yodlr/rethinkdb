@@ -12,7 +12,7 @@ DEBIAN_PKG_DIR := $(PACKAGING_DIR)/debian
 SUPPRESSED_LINTIAN_TAGS := new-package-should-close-itp-bug
 DEB_CONTROL_ROOT := $(DEB_PACKAGE_DIR)/DEBIAN
 
-DIST_FILE_LIST_REL := admin demos docs drivers mk packaging scripts src test
+DIST_FILE_LIST_REL := admin demos drivers mk packaging scripts src test
 DIST_FILE_LIST_REL += configure COPYRIGHT Makefile NOTES.md README.md
 
 DIST_FILE_LIST := $(foreach x,$(DIST_FILE_LIST_REL),$/$x)
@@ -28,7 +28,7 @@ prepare_deb_package_dirs:
 DIST_SUPPORT_PACKAGES := re2 gtest handlebars v8
 DIST_CUSTOM_MK_LINES :=
 ifeq ($(BUILD_PORTABLE),1)
-  DIST_SUPPORT_PACKAGES += protobuf gperftools libunwind boost
+  DIST_SUPPORT_PACKAGES += protobuf jemalloc boost icu
   DIST_CUSTOM_MK_LINES += 'BUILD_PORTABLE := 1'
 
   ifneq ($(CWD),$(TOP))
@@ -42,11 +42,11 @@ DSC_CONFIGURE_DEFAULT = --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 DIST_CONFIGURE_DEFAULT_FETCH = $(foreach pkg, $(DIST_SUPPORT_PACKAGES), --fetch $(pkg))
 DIST_SUPPORT = $(foreach pkg, $(DIST_SUPPORT_PACKAGES), $(SUPPORT_SRC_DIR)/$(pkg)_$($(pkg)_VERSION))
 
-DEB_BUILD_DEPENDS := g++, libboost-dev, libssl-dev, curl, m4, debhelper
+DEB_BUILD_DEPENDS := g++, libboost-dev, libssl-dev, curl, m4, debhelper, libicu-dev
 DEB_BUILD_DEPENDS += , fakeroot, python, libncurses5-dev, libcurl4-openssl-dev, libssl-dev
 
 ifneq (1,$(BUILD_PORTABLE))
-  DEB_BUILD_DEPENDS += , protobuf-compiler, libprotobuf-dev, libgoogle-perftools-dev
+  DEB_BUILD_DEPENDS += , protobuf-compiler, libprotobuf-dev, libjemalloc-dev
 endif
 
 ifeq ($(BUILD_PORTABLE),1)
@@ -100,7 +100,7 @@ build-deb: deb-src-dir
 	cd $(DSC_PACKAGE_DIR) && dpkg-buildpackage -rfakeroot $(DEBUILD_SIGN_OPTIONS)
 
 .PHONY: install-osx
-install-osx: install-binaries install-web
+install-osx: install-binaries
 
 ifneq (Darwin,$(OS))
   OSX_DMG_BUILD = $(error MacOS package can only be built on that OS)

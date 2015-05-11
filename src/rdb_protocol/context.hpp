@@ -11,80 +11,135 @@
 #include <boost/optional.hpp>
 #include <boost/shared_ptr.hpp>
 
+#include "concurrency/one_per_thread.hpp"
 #include "concurrency/promise.hpp"
 #include "containers/counted.hpp"
 #include "containers/name_string.hpp"
 #include "containers/scoped.hpp"
 #include "containers/uuid.hpp"
-#include "rdb_protocol/geo/distances.hpp"
-#include "rdb_protocol/geo/lon_lat_types.hpp"
 #include "perfmon/perfmon.hpp"
 #include "protocol_api.hpp"
-#include "rdb_protocol/changes.hpp"
+#include "rdb_protocol/changefeed.hpp"
 #include "rdb_protocol/datum.hpp"
+#include "rdb_protocol/geo/distances.hpp"
+#include "rdb_protocol/geo/lon_lat_types.hpp"
 #include "rdb_protocol/shards.hpp"
 #include "rdb_protocol/wire_func.hpp"
 
+enum class return_changes_t {
+    NO = 0,
+    YES = 1,
+    ALWAYS = 2
+};
+ARCHIVE_PRIM_MAKE_RANGED_SERIALIZABLE(
+        return_changes_t, int8_t,
+        return_changes_t::NO, return_changes_t::ALWAYS);
+
 class auth_semilattice_metadata_t;
-class datum_range_t;
 class ellipsoid_spec_t;
 class extproc_pool_t;
 class name_string_t;
 class namespace_interface_t;
 template <class> class semilattice_readwrite_view_t;
-enum class sindex_rename_result_t;
 
-enum class sindex_multi_bool_t;
-enum class sindex_geo_bool_t;
+enum class sindex_multi_bool_t { SINGLE = 0, MULTI = 1};
+enum class sindex_geo_bool_t { REGULAR = 0, GEO = 1};
+
+ARCHIVE_PRIM_MAKE_RANGED_SERIALIZABLE(sindex_multi_bool_t, int8_t,
+        sindex_multi_bool_t::SINGLE, sindex_multi_bool_t::MULTI);
+ARCHIVE_PRIM_MAKE_RANGED_SERIALIZABLE(sindex_geo_bool_t, int8_t,
+        sindex_geo_bool_t::REGULAR, sindex_geo_bool_t::GEO);
+
+class sindex_config_t {
+public:
+    sindex_config_t() { }
+    sindex_config_t(const ql::map_wire_func_t &_func, reql_version_t _func_version,
+            sindex_multi_bool_t _multi, sindex_geo_bool_t _geo) :
+        func(_func), func_version(_func_version), multi(_multi), geo(_geo) { }
+
+    bool operator==(const sindex_config_t &o) const;
+    bool operator!=(const sindex_config_t &o) const {
+        return !(*this == o);
+    }
+
+    ql::map_wire_func_t func;
+    reql_version_t func_version;
+    sindex_multi_bool_t multi;
+    sindex_geo_bool_t geo;
+};
+RDB_DECLARE_SERIALIZABLE(sindex_config_t);
+
+class sindex_status_t {
+public:
+    sindex_status_t() :
+        blocks_processed(0), blocks_total(0), ready(true), outdated(false) { }
+    void accum(const sindex_status_t &other);
+    size_t blocks_processed, blocks_total;
+    bool ready;
+    bool outdated;
+};
+RDB_DECLARE_SERIALIZABLE(sindex_status_t);
 
 namespace ql {
 class configured_limits_t;
-
+class env_t;
+class query_cache_t;
 class db_t : public single_threaded_countable_t<db_t> {
 public:
-    db_t(uuid_u _id, const std::string &_name) : id(_id), name(_name) { }
+    db_t(uuid_u _id, const name_string_t &_name) : id(_id), name(_name) { }
     const uuid_u id;
-    const std::string name;
+    const name_string_t name;
 };
-
-class env_t;
-
-}   // namespace ql
+} // namespace ql
 
 class table_generate_config_params_t {
 public:
+    static table_generate_config_params_t make_default() {
+        table_generate_config_params_t p;
+        p.num_shards = 1;
+        p.primary_replica_tag = name_string_t::guarantee_valid("default");
+        p.num_replicas[p.primary_replica_tag] = 1;
+        return p;
+    }
     size_t num_shards;
     std::map<name_string_t, size_t> num_replicas;
-    name_string_t director_tag;
+    name_string_t primary_replica_tag;
 };
 
-class base_table_t {
+enum class admin_identifier_format_t {
+    /* Some parts of the code rely on the fact that `admin_identifier_format_t` can be
+    mapped to `{0, 1}` using `static_cast`. */
+    name = 0,
+    uuid = 1
+};
+
+class base_table_t : public slow_atomic_countable_t<base_table_t> {
 public:
-    virtual const std::string &get_pkey() = 0;
+    virtual ql::datum_t get_id() const = 0;
+    virtual const std::string &get_pkey() const = 0;
 
     virtual ql::datum_t read_row(ql::env_t *env,
         ql::datum_t pval, bool use_outdated) = 0;
     virtual counted_t<ql::datum_stream_t> read_all(
         ql::env_t *env,
         const std::string &sindex,
-        const ql::protob_t<const Backtrace> &bt,
+        ql::backtrace_id_t bt,
         const std::string &table_name,   /* the table's own name, for display purposes */
-        const datum_range_t &range,
+        const ql::datum_range_t &range,
         sorting_t sorting,
         bool use_outdated) = 0;
-    virtual counted_t<ql::datum_stream_t> read_row_changes(
+    virtual counted_t<ql::datum_stream_t> read_changes(
         ql::env_t *env,
-        ql::datum_t pval,
-        const ql::protob_t<const Backtrace> &bt,
-        const std::string &table_name) = 0;
-    virtual counted_t<ql::datum_stream_t> read_all_changes(
-        ql::env_t *env,
-        const ql::protob_t<const Backtrace> &bt,
+        counted_t<ql::datum_stream_t> maybe_src,
+        const ql::datum_t &squash,
+        bool include_states,
+        ql::changefeed::keyspec_t::spec_t &&spec,
+        ql::backtrace_id_t bt,
         const std::string &table_name) = 0;
     virtual counted_t<ql::datum_stream_t> read_intersecting(
         ql::env_t *env,
         const std::string &sindex,
-        const ql::protob_t<const Backtrace> &bt,
+        ql::backtrace_id_t bt,
         const std::string &table_name,
         bool use_outdated,
         const ql::datum_t &query_geometry) = 0;
@@ -112,16 +167,6 @@ public:
     virtual bool write_sync_depending_on_durability(ql::env_t *env,
         durability_requirement_t durability) = 0;
 
-    virtual bool sindex_create(ql::env_t *env, const std::string &id,
-        counted_t<const ql::func_t> index_func, sindex_multi_bool_t multi,
-        sindex_geo_bool_t geo) = 0;
-    virtual bool sindex_drop(ql::env_t *env, const std::string &id) = 0;
-    virtual sindex_rename_result_t sindex_rename(ql::env_t *env,
-        const std::string &old_name, const std::string &new_name, bool overwrite) = 0;
-    virtual std::vector<std::string> sindex_list(ql::env_t *env) = 0;
-    virtual std::map<std::string, ql::datum_t> sindex_status(
-        ql::env_t *env, const std::set<std::string> &sindexes) = 0;
-
     /* This must be public */
     virtual ~base_table_t() { }
 };
@@ -136,51 +181,133 @@ public:
     concurrently in arbitrary ways. By the time a method returns, any changes it makes
     must be visible on every thread. */
 
+    /* From the user's point of view, many of these are methods on the table object. The
+    reason they're internally defined on `reql_cluster_interface_t` rather than
+    `base_table_t` is because their implementations fits better with the implementations
+    of the other methods of `reql_cluster_interface_t` than `base_table_t`. */
+
     virtual bool db_create(const name_string_t &name,
-            signal_t *interruptor, std::string *error_out) = 0;
+            signal_t *interruptor, ql::datum_t *result_out, std::string *error_out) = 0;
     virtual bool db_drop(const name_string_t &name,
-            signal_t *interruptor, std::string *error_out) = 0;
+            signal_t *interruptor, ql::datum_t *result_out, std::string *error_out) = 0;
     virtual bool db_list(
             signal_t *interruptor,
             std::set<name_string_t> *names_out, std::string *error_out) = 0;
     virtual bool db_find(const name_string_t &name,
             signal_t *interruptor,
             counted_t<const ql::db_t> *db_out, std::string *error_out) = 0;
+    virtual bool db_config(
+            const counted_t<const ql::db_t> &db,
+            ql::backtrace_id_t bt,
+            ql::env_t *env,
+            scoped_ptr_t<ql::val_t> *selection_out,
+            std::string *error_out) = 0;
 
     /* `table_create()` won't return until the table is ready for reading */
     virtual bool table_create(const name_string_t &name, counted_t<const ql::db_t> db,
-            const boost::optional<name_string_t> &primary_dc, bool hard_durability,
-            const std::string &primary_key,
-            signal_t *interruptor, std::string *error_out) = 0;
+            const table_generate_config_params_t &config_params,
+            const std::string &primary_key, write_durability_t durability,
+            signal_t *interruptor, ql::datum_t *result_out, std::string *error_out) = 0;
     virtual bool table_drop(const name_string_t &name, counted_t<const ql::db_t> db,
-            signal_t *interruptor, std::string *error_out) = 0;
+            signal_t *interruptor, ql::datum_t *result_out, std::string *error_out) = 0;
     virtual bool table_list(counted_t<const ql::db_t> db,
             signal_t *interruptor, std::set<name_string_t> *names_out,
             std::string *error_out) = 0;
     virtual bool table_find(const name_string_t &name, counted_t<const ql::db_t> db,
-            signal_t *interruptor, scoped_ptr_t<base_table_t> *table_out,
+            boost::optional<admin_identifier_format_t> identifier_format,
+            signal_t *interruptor, counted_t<base_table_t> *table_out,
             std::string *error_out) = 0;
-    virtual bool table_config(const boost::optional<name_string_t> &name,
-            counted_t<const ql::db_t> db, const ql::protob_t<const Backtrace> &bt,
-            signal_t *interruptor, scoped_ptr_t<ql::val_t> *resp_out,
+    virtual bool table_estimate_doc_counts(
+            counted_t<const ql::db_t> db,
+            const name_string_t &name,
+            ql::env_t *env,
+            std::vector<int64_t> *doc_counts_out,
             std::string *error_out) = 0;
-    virtual bool table_status(const boost::optional<name_string_t> &name,
-            counted_t<const ql::db_t> db, const ql::protob_t<const Backtrace> &bt,
-            signal_t *interruptor, scoped_ptr_t<ql::val_t> *resp_out,
+    virtual bool table_config(
+            counted_t<const ql::db_t> db,
+            const name_string_t &name,
+            ql::backtrace_id_t bt,
+            ql::env_t *env,
+            scoped_ptr_t<ql::val_t> *selection_out,
+            std::string *error_out) = 0;
+    virtual bool table_status(
+            counted_t<const ql::db_t> db,
+            const name_string_t &name,
+            ql::backtrace_id_t bt,
+            ql::env_t *env,
+            scoped_ptr_t<ql::val_t> *selection_out,
             std::string *error_out) = 0;
 
-    /* From the user's point of view, this is a method on the table object. The reason
-    it's internally defined on `reql_cluster_interface_t` rather than `base_table_t` is
-    because its implementation fits much better with the implementations of the other
-    methods of `reql_cluster_interface_t` than `base_table_t`. */
+    virtual bool table_wait(
+            counted_t<const ql::db_t> db,
+            const name_string_t &name,
+            table_readiness_t readiness,
+            signal_t *interruptor,
+            ql::datum_t *result_out,
+            std::string *error_out) = 0;
+    virtual bool db_wait(
+            counted_t<const ql::db_t> db,
+            table_readiness_t readiness,
+            signal_t *interruptor,
+            ql::datum_t *result_out,
+            std::string *error_out) = 0;
+
     virtual bool table_reconfigure(
             counted_t<const ql::db_t> db,
             const name_string_t &name,
             const table_generate_config_params_t &params,
             bool dry_run,
             signal_t *interruptor,
-            ql::datum_t *new_config_out,
+            ql::datum_t *result_out,
             std::string *error_out) = 0;
+    virtual bool db_reconfigure(
+            counted_t<const ql::db_t> db,
+            const table_generate_config_params_t &params,
+            bool dry_run,
+            signal_t *interruptor,
+            ql::datum_t *result_out,
+            std::string *error_out) = 0;
+
+    virtual bool table_rebalance(
+            counted_t<const ql::db_t> db,
+            const name_string_t &name,
+            signal_t *interruptor,
+            ql::datum_t *result_out,
+            std::string *error_out) = 0;
+    virtual bool db_rebalance(
+            counted_t<const ql::db_t> db,
+            signal_t *interruptor,
+            ql::datum_t *result_out,
+            std::string *error_out) = 0;
+
+    virtual bool sindex_create(
+            counted_t<const ql::db_t> db,
+            const name_string_t &table,
+            const std::string &name,
+            const sindex_config_t &config,
+            signal_t *interruptor,
+            std::string *error_out) = 0;
+    virtual bool sindex_drop(
+            counted_t<const ql::db_t> db,
+            const name_string_t &table,
+            const std::string &name,
+            signal_t *interruptor,
+            std::string *error_out) = 0;
+    virtual bool sindex_rename(
+            counted_t<const ql::db_t> db,
+            const name_string_t &table,
+            const std::string &name,
+            const std::string &new_name,
+            bool overwrite,
+            signal_t *interruptor,
+            std::string *error_out) = 0;
+    virtual bool sindex_list(
+            counted_t<const ql::db_t> db,
+            const name_string_t &table,
+            signal_t *interruptor,
+            std::string *error_out,
+            std::map<std::string, std::pair<sindex_config_t, sindex_status_t> >
+                *configs_and_statuses_out) = 0;
 
 protected:
     virtual ~reql_cluster_interface_t() { }   // silence compiler warnings
@@ -203,7 +330,7 @@ public:
                   boost::shared_ptr<
                     semilattice_readwrite_view_t<
                         auth_semilattice_metadata_t> > _auth_metadata,
-                  perfmon_collection_t *_global_stats,
+                  perfmon_collection_t *global_stats,
                   const std::string &_reql_http_proxy);
 
     ~rdb_context_t();
@@ -216,12 +343,30 @@ public:
 
     mailbox_manager_t *manager;
 
-    perfmon_collection_t ql_stats_collection;
-    perfmon_membership_t ql_stats_membership;
-    perfmon_counter_t ql_ops_running;
-    perfmon_membership_t ql_ops_running_membership;
-
     const std::string reql_http_proxy;
+
+    class stats_t {
+    public:
+        explicit stats_t(perfmon_collection_t *global_stats);
+
+        perfmon_collection_t qe_stats_collection;
+        perfmon_membership_t qe_stats_membership;
+        perfmon_counter_t client_connections;
+        perfmon_membership_t client_connections_membership;
+        perfmon_counter_t clients_active;
+        perfmon_membership_t clients_active_membership;
+        perfmon_rate_monitor_t queries_per_sec;
+        perfmon_membership_t queries_per_sec_membership;
+        perfmon_counter_t queries_total;
+        perfmon_membership_t queries_total_membership;
+    private:
+        DISABLE_COPYING(stats_t);
+    } stats;
+
+    std::set<ql::query_cache_t *> *get_query_caches_for_this_thread();
+
+private:
+    one_per_thread_t<std::set<ql::query_cache_t *> > query_caches;
 
 private:
     DISABLE_COPYING(rdb_context_t);

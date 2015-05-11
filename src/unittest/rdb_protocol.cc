@@ -8,20 +8,21 @@
 #include <boost/shared_ptr.hpp>
 
 #include "arch/io/disk.hpp"
-#include "buffer_cache/alt/cache_balancer.hpp"
+#include "buffer_cache/cache_balancer.hpp"
 #include "clustering/administration/metadata.hpp"
 #include "extproc/extproc_pool.hpp"
 #include "extproc/extproc_spawner.hpp"
+#include "rdb_protocol/changefeed.hpp"
 #include "rdb_protocol/minidriver.hpp"
 #include "rdb_protocol/pb_utils.hpp"
 #include "rdb_protocol/protocol.hpp"
 #include "rdb_protocol/store.hpp"
-#include "region/region_json_adapter.hpp"
 #include "rpc/directory/read_manager.hpp"
 #include "rpc/semilattice/semilattice_manager.hpp"
 #include "serializer/config.hpp"
 #include "serializer/translator.hpp"
 #include "stl_utils.hpp"
+#include "store_subview.hpp"
 #include "unittest/dummy_namespace_interface.hpp"
 #include "unittest/gtest.hpp"
 #include "unittest/unittest_utils.hpp"
@@ -29,7 +30,11 @@
 namespace unittest {
 
 void run_with_namespace_interface(
-        boost::function<void(namespace_interface_t *, order_source_t *)> fun,
+        boost::function<void(
+            namespace_interface_t *,
+            order_source_t *,
+            const std::vector<scoped_ptr_t<store_t> > *
+            )> fun,
         bool oversharding,
         int num_restarts) {
     recreate_temporary_directory(base_path_t("."));
@@ -74,11 +79,11 @@ void run_with_namespace_interface(
         std::vector<scoped_ptr_t<store_t> > underlying_stores;
         for (size_t i = 0; i < store_shards.size(); ++i) {
             underlying_stores.push_back(
-                    make_scoped<store_t>(serializers[i].get(), &balancer,
-                        temp_files[i]->name().permanent_path(), do_create,
-                        &get_global_perfmon_collection(), &ctx,
-                        &io_backender, base_path_t("."),
-                        static_cast<outdated_index_report_t *>(NULL)));
+                    make_scoped<store_t>(region_t::universe(), serializers[i].get(),
+                        &balancer, temp_files[i]->name().permanent_path(), do_create,
+                        &get_global_perfmon_collection(), &ctx, &io_backender,
+                        base_path_t("."), scoped_ptr_t<outdated_index_report_t>(),
+                        generate_uuid()));
         }
 
         std::vector<scoped_ptr_t<store_view_t> > stores;
@@ -102,12 +107,15 @@ void run_with_namespace_interface(
                                         &ctx,
                                         do_create);
 
-        fun(&nsi, &order_source);
+        fun(&nsi, &order_source, &underlying_stores);
     }
 }
 
 void run_in_thread_pool_with_namespace_interface(
-        boost::function<void(namespace_interface_t *, order_source_t*)> fun,
+        boost::function<void(
+            namespace_interface_t *,
+            order_source_t *,
+            const std::vector<scoped_ptr_t<store_t> > *)> fun,
         bool oversharded,
         int num_restarts = 1) {
     extproc_spawner_t extproc_spawner;
@@ -119,7 +127,10 @@ void run_in_thread_pool_with_namespace_interface(
 
 /* `SetupTeardown` makes sure that it can start and stop without anything going
 horribly wrong */
-void run_setup_teardown_test(UNUSED namespace_interface_t *nsi, order_source_t *) {
+void run_setup_teardown_test(
+        namespace_interface_t *,
+        order_source_t *,
+        const std::vector<scoped_ptr_t<store_t> > *) {
     /* Do nothing */
 }
 TEST(RDBProtocol, SetupTeardown) {
@@ -131,7 +142,10 @@ TEST(RDBProtocol, OvershardedSetupTeardown) {
 }
 
 /* `GetSet` tests basic get and set operations */
-void run_get_set_test(namespace_interface_t *nsi, order_source_t *osource) {
+void run_get_set_test(
+        namespace_interface_t *nsi,
+        order_source_t *osource,
+        const std::vector<scoped_ptr_t<store_t> > *) {
     {
         write_t write(
                 point_write_t(store_key_t("a"), ql::datum_t::null()),
@@ -175,98 +189,78 @@ TEST(RDBProtocol, OvershardedGetSet) {
     run_in_thread_pool_with_namespace_interface(&run_get_set_test, true);
 }
 
-std::string create_sindex(namespace_interface_t *nsi,
-                          order_source_t *osource) {
+std::string create_sindex(const std::vector<scoped_ptr_t<store_t> > *stores) {
     std::string id = uuid_to_str(generate_uuid());
 
     const ql::sym_t arg(1);
     ql::protob_t<const Term> mapping = ql::r::var(arg)["sid"].release_counted();
+    sindex_config_t sindex(
+        ql::map_wire_func_t(mapping, make_vector(arg), ql::backtrace_id_t::empty()),
+        reql_version_t::LATEST,
+        sindex_multi_bool_t::SINGLE,
+        sindex_geo_bool_t::REGULAR);
 
-    ql::map_wire_func_t m(mapping, make_vector(arg), get_backtrace(mapping));
-
-    write_t write(sindex_create_t(id, m, sindex_multi_bool_t::SINGLE,
-                                  sindex_geo_bool_t::REGULAR),
-                  profile_bool_t::PROFILE, ql::configured_limits_t());
-    write_response_t response;
-
-    cond_t interruptor;
-    nsi->write(write, &response, osource->check_in("unittest::create_sindex(rdb_protocol.cc-A"), &interruptor);
-
-    if (!boost::get<sindex_create_response_t>(&response.response)) {
-        ADD_FAILURE() << "got wrong type of result back";
+    cond_t non_interruptor;
+    for (const auto &store : *stores) {
+        store->sindex_create(id, sindex, &non_interruptor);
     }
 
     return id;
 }
 
-void wait_for_sindex(namespace_interface_t *nsi,
-                          order_source_t *osource,
-                          const std::string &id) {
-    std::set<std::string> sindexes;
-    sindexes.insert(id);
+void wait_for_sindex(
+        const std::vector<scoped_ptr_t<store_t> > *stores,
+        const std::string &id) {
+    cond_t non_interruptor;
     for (int attempts = 0; attempts < 35; ++attempts) {
-        sindex_status_t d(sindexes);
-        read_t read(d, profile_bool_t::PROFILE);
-        read_response_t response;
-
-        cond_t interruptor;
-        nsi->read(read, &response, osource->check_in("unittest::wait_for_sindex(rdb_protocol_t.cc-A"), &interruptor);
-
-        sindex_status_response_t *res =
-            boost::get<sindex_status_response_t>(&response.response);
-
-        if (res == NULL) {
-            ADD_FAILURE() << "got wrong type of result back";
+        bool all_ok = true;
+        for (const auto &store : *stores) {
+            std::map<std::string, std::pair<sindex_config_t, sindex_status_t> > res =
+                store->sindex_list(&non_interruptor);
+            auto it = res.find(id);
+            if (it == res.end() || !it->second.second.ready) {
+                all_ok = false;
+                continue;
+            }
         }
-
-        auto it = res->statuses.find(id);
-        if (it != res->statuses.end() && it->second.ready) {
+        if (all_ok) {
             return;
-        } else {
-            nap((attempts+1) * 50);
         }
+        nap((attempts + 1) * 50);
     }
     ADD_FAILURE() << "Waiting for sindex " << id << " timed out.";
 }
 
-bool drop_sindex(namespace_interface_t *nsi,
-                 order_source_t *osource,
+void drop_sindex(const std::vector<scoped_ptr_t<store_t> > *stores,
                  const std::string &id) {
-    sindex_drop_t d(id);
-    write_t write(d, profile_bool_t::PROFILE, ql::configured_limits_t());
-    write_response_t response;
-
-    cond_t interruptor;
-    nsi->write(write, &response, osource->check_in("unittest::drop_sindex(rdb_protocol.cc-A"), &interruptor);
-
-    sindex_drop_response_t *res = boost::get<sindex_drop_response_t>(&response.response);
-
-    if (res == NULL) {
-        ADD_FAILURE() << "got wrong type of result back";
+    cond_t non_interruptor;
+    for (const auto &store : *stores) {
+        store->sindex_drop(id, &non_interruptor);
     }
-
-    return res->success;
 }
 
-void run_create_drop_sindex_test(namespace_interface_t *nsi, order_source_t *osource) {
+void run_create_drop_sindex_test(
+        namespace_interface_t *nsi,
+        order_source_t *osource,
+        const std::vector<scoped_ptr_t<store_t> > *stores) {
     /* Create a secondary index. */
-    std::string id = create_sindex(nsi, osource);
-    wait_for_sindex(nsi, osource, id);
+    std::string id = create_sindex(stores);
+    wait_for_sindex(stores, id);
 
-    std::shared_ptr<const scoped_cJSON_t> data(
-        new scoped_cJSON_t(cJSON_Parse("{\"id\" : 0, \"sid\" : 1}")));
+    rapidjson::Document data;
+    data.Parse("{\"id\" : 0, \"sid\" : 1}");
+    ASSERT_FALSE(data.HasParseError());
     ql::configured_limits_t limits;
     ql::datum_t d
-        = ql::to_datum(cJSON_slow_GetObjectItem(data->get(), "id"), limits);
+        = ql::to_datum(data.FindMember("id")->value, limits, reql_version_t::LATEST);
     store_key_t pk = store_key_t(d.print_primary());
     ql::datum_t sindex_key_literal = ql::datum_t(1.0);
 
-    ASSERT_TRUE(data->get());
     {
         /* Insert a piece of data (it will be indexed using the secondary
          * index). */
         write_t write(
-            point_write_t(pk, ql::to_datum(data->get(), limits)),
+            point_write_t(pk, ql::to_datum(data, limits, reql_version_t::LATEST)),
             DURABILITY_REQUIREMENT_DEFAULT,
             profile_bool_t::PROFILE,
             ql::configured_limits_t());
@@ -301,10 +295,11 @@ void run_create_drop_sindex_test(namespace_interface_t *nsi, order_source_t *oso
             ASSERT_TRUE(streams != NULL);
             ASSERT_EQ(1, streams->size());
             // Order doesn't matter because streams->size() is 1.
-            auto stream = &streams->begin(ql::grouped::order_doesnt_matter_t())->second;
+            auto stream = &streams->begin()->second;
             ASSERT_TRUE(stream != NULL);
             ASSERT_EQ(1u, stream->size());
-            ASSERT_EQ(ql::to_datum(data->get(), limits), stream->at(0).data);
+            ASSERT_EQ(ql::to_datum(data, limits, reql_version_t::LATEST),
+                      stream->at(0).data);
         } else {
             ADD_FAILURE() << "got wrong type of result back";
         }
@@ -345,10 +340,7 @@ void run_create_drop_sindex_test(namespace_interface_t *nsi, order_source_t *oso
         }
     }
 
-    {
-        const bool drop_sindex_res = drop_sindex(nsi, osource, id);
-        ASSERT_TRUE(drop_sindex_res);
-    }
+    drop_sindex(stores, id);
 }
 
 void populate_sindex(namespace_interface_t *nsi,
@@ -356,16 +348,19 @@ void populate_sindex(namespace_interface_t *nsi,
                      int num_docs) {
     for (int i = 0; i < num_docs; ++i) {
         std::string json_doc = strprintf("{\"id\" : %d, \"sid\" : %d}", i, i % 4);
-        std::shared_ptr<const scoped_cJSON_t> data(
-            new scoped_cJSON_t(cJSON_Parse(json_doc.c_str())));
+        rapidjson::Document data;
+        data.Parse(json_doc.c_str());
+        ASSERT_FALSE(data.HasParseError());
         ql::configured_limits_t limits;
         ql::datum_t d
-            = ql::to_datum(cJSON_slow_GetObjectItem(data->get(), "id"), limits);
+            = ql::to_datum(data.FindMember("id")->value, limits,
+                           reql_version_t::LATEST);
         store_key_t pk = store_key_t(d.print_primary());
 
         /* Insert a piece of data (it will be indexed using the secondary
          * index). */
-        write_t write(point_write_t(pk, ql::to_datum(data->get(), limits)),
+        write_t write(point_write_t(pk, ql::to_datum(data, limits,
+                                                     reql_version_t::LATEST)),
                       DURABILITY_REQUIREMENT_SOFT, profile_bool_t::PROFILE, limits);
         write_response_t response;
 
@@ -384,29 +379,33 @@ void populate_sindex(namespace_interface_t *nsi,
     }
 }
 
-void run_create_drop_sindex_with_data_test(namespace_interface_t *nsi,
-                                           order_source_t *osource,
-                                           int num_docs) {
+void run_create_drop_sindex_with_data_test(
+        namespace_interface_t *nsi,
+        order_source_t *osource,
+        const std::vector<scoped_ptr_t<store_t> > *stores,
+        int num_docs) {
     /* Create a secondary index. */
-    std::string id = create_sindex(nsi, osource);
-    wait_for_sindex(nsi, osource, id);
-
+    std::string id = create_sindex(stores);
+    wait_for_sindex(stores, id);
     populate_sindex(nsi, osource, num_docs);
-
-    {
-        const bool drop_sindex_res = drop_sindex(nsi, osource, id);
-        ASSERT_TRUE(drop_sindex_res);
-    }
+    drop_sindex(stores, id);
 }
 
-void run_repeated_sindex_test(namespace_interface_t *nsi,
-                              order_source_t *osource,
-                              void (*fn)(namespace_interface_t *, order_source_t *, int)) {
+void run_repeated_sindex_test(
+        namespace_interface_t *nsi,
+        order_source_t *osource,
+        const std::vector<scoped_ptr_t<store_t> > *stores,
+        void (*fn)(
+            namespace_interface_t *,
+            order_source_t *,
+            const std::vector<scoped_ptr_t<store_t> > *,
+            int)
+        ) {
     // Run the test with just a few documents in it
-    fn(nsi, osource, 128);
+    fn(nsi, osource, stores, 128);
     // ... and just for fun sometimes do it a second time immediately after.
     if (randint(4) == 0) {
-        fn(nsi, osource, 128);
+        fn(nsi, osource, stores, 128);
     }
 
     // Nap for a random time before we shut down the namespace interface
@@ -426,6 +425,7 @@ TEST(RDBProtocol, SindexRepeatedCreateDrop) {
         std::bind(&run_repeated_sindex_test,
                   std::placeholders::_1,
                   std::placeholders::_2,
+                  std::placeholders::_3,
                   &run_create_drop_sindex_with_data_test),
         false,
         10);
@@ -435,25 +435,14 @@ TEST(RDBProtocol, OvershardedSindexCreateDrop) {
     run_in_thread_pool_with_namespace_interface(&run_create_drop_sindex_test, true);
 }
 
-void rename_sindex(namespace_interface_t *nsi,
-                   order_source_t *osource,
+void rename_sindex(const std::vector<scoped_ptr_t<store_t> > *stores,
                    std::string old_name,
-                   std::string new_name,
-                   bool overwrite,
-                   sindex_rename_result_t expected_result) {
-    cond_t dummy_interruptor;
-    write_t write(sindex_rename_t(old_name, new_name, overwrite),
-                  profile_bool_t::PROFILE, ql::configured_limits_t());
-    write_response_t response;
-    nsi->write(write, &response,
-               osource->check_in("unittest::rename_sindex(rdb_protocol.cc-A"),
-               &dummy_interruptor);
-
-    sindex_rename_response_t *res = boost::get<sindex_rename_response_t>(&response.response);
-    if (res == NULL) {
-        ADD_FAILURE() << "got wrong type of result back";
+                   std::string new_name) {
+    std::map<std::string, std::string> renames{ {old_name, new_name} };
+    cond_t non_interruptor;
+    for (const auto &store : *stores) {
+        store->sindex_rename_multi(renames, &non_interruptor);
     }
-    ASSERT_EQ(expected_result, res->result);
 }
 
 void read_sindex(namespace_interface_t *nsi,
@@ -475,8 +464,7 @@ void read_sindex(namespace_interface_t *nsi,
         ASSERT_TRUE(streams != NULL);
         ASSERT_EQ(1, streams->size());
         // Order doesn't matter because streams->size() is 1.
-        ql::stream_t *stream
-            = &streams->begin(ql::grouped::order_doesnt_matter_t())->second;
+        ql::stream_t *stream = &streams->begin()->second;
         ASSERT_TRUE(stream != NULL);
         ASSERT_EQ(expected_size, stream->size());
     } else {
@@ -486,63 +474,36 @@ void read_sindex(namespace_interface_t *nsi,
 
 void run_rename_sindex_test(namespace_interface_t *nsi,
                             order_source_t *osource,
+                            const std::vector<scoped_ptr_t<store_t> > *stores,
                             int num_rows) {
     bool sindex_before_data = randint(2) == 0;
     std::string id1;
     std::string id2;
 
     if (sindex_before_data) {
-        id1 = create_sindex(nsi, osource);
-        id2 = create_sindex(nsi, osource);
+        id1 = create_sindex(stores);
+        id2 = create_sindex(stores);
     }
 
     populate_sindex(nsi, osource, num_rows);
 
     if (!sindex_before_data) {
-        id1 = create_sindex(nsi, osource);
-        id2 = create_sindex(nsi, osource);
+        id1 = create_sindex(stores);
+        id2 = create_sindex(stores);
     }
 
-    wait_for_sindex(nsi, osource, id1);
-    wait_for_sindex(nsi, osource, id2);
+    wait_for_sindex(stores, id1);
+    wait_for_sindex(stores, id2);
 
-    // Do a bunch of renaming with and without errors
-    rename_sindex(nsi, osource,
-                  id1, id2, false,
-                  sindex_rename_result_t::NEW_NAME_EXISTS);
-
-    rename_sindex(nsi, osource,
-                  "fake", id2, false,
-                  sindex_rename_result_t::NEW_NAME_EXISTS);
-
-    rename_sindex(nsi, osource,
-                  id1, id2, true,
-                  sindex_rename_result_t::SUCCESS);
-
-    rename_sindex(nsi, osource,
-                  id1, id2, true,
-                  sindex_rename_result_t::OLD_NAME_DOESNT_EXIST);
-
-    rename_sindex(nsi, osource,
-                  id2, "fake", true,
-                  sindex_rename_result_t::SUCCESS);
-
-    rename_sindex(nsi, osource,
-                  "fake", "last", true,
-                  sindex_rename_result_t::SUCCESS);
-
-    rename_sindex(nsi, osource,
-                  "fake", "fake2", false,
-                  sindex_rename_result_t::OLD_NAME_DOESNT_EXIST);
+    rename_sindex(stores, id1, id2);
+    rename_sindex(stores, id2, "fake");
+    rename_sindex(stores, "fake", "last");
 
     // At this point the only sindex should be 'last'
     // Perform a read to make sure it survived all the moves
     read_sindex(nsi, osource, 3.0, "last", num_rows / 4);
 
-    {
-        const bool drop_sindex_res = drop_sindex(nsi, osource, "last");
-        ASSERT_TRUE(drop_sindex_res);
-    }
+    drop_sindex(stores, "last");
 }
 
 TEST(RDBProtocol, SindexRename) {
@@ -550,6 +511,7 @@ TEST(RDBProtocol, SindexRename) {
         std::bind(&run_rename_sindex_test,
                   std::placeholders::_1,
                   std::placeholders::_2,
+                  std::placeholders::_3,
                   64),
         false);
 }
@@ -559,6 +521,7 @@ TEST(RDBProtocol, OvershardedSindexRename) {
         std::bind(&run_rename_sindex_test,
                   std::placeholders::_1,
                   std::placeholders::_2,
+                  std::placeholders::_3,
                   64),
         true);
 }
@@ -569,29 +532,32 @@ TEST(RDBProtocol, SindexRepeatedRename) {
         std::bind(&run_repeated_sindex_test,
                   std::placeholders::_1,
                   std::placeholders::_2,
+                  std::placeholders::_3,
                   &run_rename_sindex_test),
         false,
         10);
 }
 
-std::set<std::string> list_sindexes(namespace_interface_t *nsi, order_source_t *osource) {
-    sindex_list_t l;
-    read_t read(l, profile_bool_t::PROFILE);
-    read_response_t response;
-
-    cond_t interruptor;
-    nsi->read(read, &response, osource->check_in("unittest::list_sindexes(rdb_protocol.cc-A"), &interruptor);
-
-    sindex_list_response_t *res = boost::get<sindex_list_response_t>(&response.response);
-
-    if (res == NULL) {
-        ADD_FAILURE() << "got wrong type of result back";
+void check_sindexes(
+        const std::vector<scoped_ptr_t<store_t> > *stores,
+        const std::set<std::string> &expect) {
+    cond_t non_interruptor;
+    for (const auto &store : *stores) {
+        std::map<std::string, std::pair<sindex_config_t, sindex_status_t> > res =
+            store->sindex_list(&non_interruptor);
+        for (const std::string &name : expect) {
+            EXPECT_EQ(1, res.count(name));
+        }
+        for (const auto &pair : res) {
+            EXPECT_EQ(1, expect.count(pair.first));
+        }
     }
-
-    return std::set<std::string>(res->sindexes.begin(), res->sindexes.end());
 }
 
-void run_sindex_list_test(namespace_interface_t *nsi, order_source_t *osource) {
+void run_sindex_list_test(
+        UNUSED namespace_interface_t *nsi,
+        UNUSED order_source_t *osource,
+        const std::vector<scoped_ptr_t<store_t> > *stores) {
     std::set<std::string> sindexes;
 
     // Do the whole test a couple times on the same namespace for kicks
@@ -600,18 +566,18 @@ void run_sindex_list_test(namespace_interface_t *nsi, order_source_t *osource) {
 
         // Make a bunch of sindexes
         for (size_t j = 0; j < reps; ++j) {
-            ASSERT_TRUE(list_sindexes(nsi, osource) == sindexes);
-            sindexes.insert(create_sindex(nsi, osource));
+            check_sindexes(stores, sindexes);
+            sindexes.insert(create_sindex(stores));
         }
 
         // Remove all the sindexes
         for (size_t j = 0; j < reps; ++j) {
-            ASSERT_TRUE(list_sindexes(nsi, osource) == sindexes);
-            ASSERT_TRUE(drop_sindex(nsi, osource, *sindexes.begin()));
+            check_sindexes(stores, sindexes);
+            drop_sindex(stores, *sindexes.begin());
             sindexes.erase(sindexes.begin());
         }
         ASSERT_TRUE(sindexes.empty());
-        ASSERT_TRUE(list_sindexes(nsi, osource).empty());
+        check_sindexes(stores, std::set<std::string>());
     } // Do it again
 }
 
@@ -623,36 +589,41 @@ TEST(RDBProtocol, OvershardedSindexList) {
     run_in_thread_pool_with_namespace_interface(&run_sindex_list_test, true);
 }
 
-void run_sindex_oversized_keys_test(namespace_interface_t *nsi, order_source_t *osource) {
-    std::string sindex_id = create_sindex(nsi, osource);
-    wait_for_sindex(nsi, osource, sindex_id);
+void run_sindex_oversized_keys_test(
+        namespace_interface_t *nsi,
+        order_source_t *osource,
+        const std::vector<scoped_ptr_t<store_t> > *stores) {
+    std::string sindex_id = create_sindex(stores);
+    wait_for_sindex(stores, sindex_id);
     ql::configured_limits_t limits;
 
     for (size_t i = 0; i < 20; ++i) {
         for (size_t j = 100; j < 200; j += 5) {
-            std::string id(i + rdb_protocol::MAX_PRIMARY_KEY_SIZE - 10,
-                           static_cast<char>(j));
+            std::string id = std::to_string(j)
+                + std::string(i + rdb_protocol::MAX_PRIMARY_KEY_SIZE - 10, ' ');
             std::string sid(j, 'a');
             auto sindex_key_literal = ql::datum_t(datum_string_t(sid));
-            std::shared_ptr<const scoped_cJSON_t> data(
-                new scoped_cJSON_t(cJSON_CreateObject()));
-            cJSON_AddItemToObject(data->get(), "id", cJSON_CreateString(id.c_str()));
-            cJSON_AddItemToObject(data->get(), "sid", cJSON_CreateString(sid.c_str()));
+            std::string json_doc = strprintf("{\"id\" : \"%s\", \"sid\" : \"%s\"}",
+                                             id.c_str(),
+                                             sid.c_str());
+            rapidjson::Document data;
+            data.Parse(json_doc.c_str());
+            ASSERT_FALSE(data.HasParseError());
             store_key_t pk;
             try {
                 pk = store_key_t(ql::to_datum(
-                                     cJSON_slow_GetObjectItem(data->get(), "id"),
-                                     limits).print_primary());
+                                     data.FindMember("id")->value,
+                                     limits, reql_version_t::LATEST).print_primary());
             } catch (const ql::base_exc_t &ex) {
                 ASSERT_TRUE(id.length() >= rdb_protocol::MAX_PRIMARY_KEY_SIZE);
                 continue;
             }
-            ASSERT_TRUE(data->get());
 
             {
                 /* Insert a piece of data (it will be indexed using the secondary
                  * index). */
-                write_t write(point_write_t(pk, ql::to_datum(data->get(), limits)),
+                write_t write(point_write_t(pk, ql::to_datum(data, limits,
+                                                             reql_version_t::LATEST)),
                               DURABILITY_REQUIREMENT_DEFAULT,
                               profile_bool_t::PROFILE,
                               limits);
@@ -684,13 +655,14 @@ void run_sindex_oversized_keys_test(namespace_interface_t *nsi, order_source_t *
                 cond_t interruptor;
                 nsi->read(read, &response, osource->check_in("unittest::run_sindex_oversized_keys_test(rdb_protocol.cc-A"), &interruptor);
 
-                if (rget_read_response_t *rget_resp = boost::get<rget_read_response_t>(&response.response)) {
+                if (rget_read_response_t *rget_resp
+                    = boost::get<rget_read_response_t>(&response.response)) {
                     auto streams = boost::get<ql::grouped_t<ql::stream_t> >(
                         &rget_resp->result);
                     ASSERT_TRUE(streams != NULL);
                     ASSERT_EQ(1, streams->size());
                     // Order doesn't matter because streams->size() is 1.
-                    auto stream = &streams->begin(ql::grouped::order_doesnt_matter_t())->second;
+                    auto stream = &streams->begin()->second;
                     ASSERT_TRUE(stream != NULL);
                     // There should be results equal to the number of iterations
                     // performed
@@ -712,20 +684,24 @@ TEST(RDBProtocol, OvershardedOverSizedKeys) {
     run_in_thread_pool_with_namespace_interface(&run_sindex_oversized_keys_test, true);
 }
 
-void run_sindex_missing_attr_test(namespace_interface_t *nsi, order_source_t *osource) {
-    create_sindex(nsi, osource);
+void run_sindex_missing_attr_test(
+        namespace_interface_t *nsi,
+        order_source_t *osource,
+        const std::vector<scoped_ptr_t<store_t> > *stores) {
+    create_sindex(stores);
 
     ql::configured_limits_t limits;
-    std::shared_ptr<const scoped_cJSON_t> data(
-        new scoped_cJSON_t(cJSON_Parse("{\"id\" : 0}")));
+    rapidjson::Document data;
+    data.Parse("{\"id\" : 0}");
+    ASSERT_FALSE(data.HasParseError());
     store_key_t pk = store_key_t(ql::to_datum(
-                                     cJSON_slow_GetObjectItem(data->get(), "id"),
-                                     limits).print_primary());
-    ASSERT_TRUE(data->get());
+                                     data.FindMember("id")->value,
+                                     limits, reql_version_t::LATEST).print_primary());
     {
         /* Insert a piece of data (it will be indexed using the secondary
          * index). */
-        write_t write(point_write_t(pk, ql::to_datum(data->get(), limits)),
+        write_t write(point_write_t(pk, ql::to_datum(data, limits,
+                                                     reql_version_t::LATEST)),
                       DURABILITY_REQUIREMENT_DEFAULT,
                       profile_bool_t::PROFILE,
                       ql::configured_limits_t());
@@ -754,6 +730,96 @@ TEST(RDBProtocol, MissingAttr) {
 
 TEST(RDBProtocol, OvershardedMissingAttr) {
     run_in_thread_pool_with_namespace_interface(&run_sindex_missing_attr_test, true);
+}
+
+TPTEST(RDBProtocol, ArtificialChangefeeds) {
+    using ql::changefeed::artificial_t;
+    using ql::changefeed::keyspec_t;
+    using ql::changefeed::msg_t;
+    class dummy_artificial_t : public artificial_t {
+    public:
+        /* This gets a notification when the last changefeed disconnects, but we don't
+        care about that. */
+        void maybe_remove() { }
+    };
+    dummy_artificial_t artificial_cfeed;
+    struct cfeed_bundle_t {
+        cfeed_bundle_t(ql::env_t *env, artificial_t *a)
+            : bt(ql::backtrace_id_t::empty()),
+              point_0(a->subscribe(
+                          env,
+                          true,
+                          false,
+                          keyspec_t::point_t{ql::datum_t(0.0)},
+                          "id",
+                          std::vector<ql::datum_t>(),
+                          bt)),
+              point_10(a->subscribe(
+                           env,
+                           true,
+                           false,
+                           keyspec_t::point_t{ql::datum_t(10.0)},
+                           "id",
+                           std::vector<ql::datum_t>(),
+                           bt)),
+              range(a->subscribe(
+                        env,
+                        true,
+                        false,
+                        keyspec_t::range_t{
+                          std::vector<ql::transform_variant_t>(),
+                          boost::optional<std::string>(),
+                          sorting_t::UNORDERED,
+                          ql::datum_range_t(
+                              ql::datum_t(0.0),
+                              key_range_t::closed,
+                              ql::datum_t(10.0),
+                              key_range_t::open)},
+                        "id",
+                        std::vector<ql::datum_t>(),
+                        bt)) { }
+        ql::backtrace_id_t bt;
+        counted_t<ql::datum_stream_t> point_0, point_10, range;
+    };
+    cond_t interruptor;
+    ql::env_t env(&interruptor,
+                  ql::return_empty_normal_batches_t::YES,
+                  reql_version_t::LATEST);
+    std::map<size_t, cfeed_bundle_t> bundles;
+    for (size_t i = 1; i <= 20; ++i) {
+        bundles.insert(std::make_pair(i, cfeed_bundle_t(&env, &artificial_cfeed)));
+        artificial_cfeed.send_all(msg_t(msg_t::change_t{
+            index_vals_t(),
+            index_vals_t(),
+            store_key_t(ql::datum_t(static_cast<double>(i)).print_primary()),
+            ql::datum_t(-static_cast<double>(i)),
+            ql::datum_t(static_cast<double>(i))}));
+    }
+    for (const auto &pair : bundles) {
+        ql::batchspec_t bs(ql::batchspec_t::all()
+                           .with_new_batch_type(ql::batch_type_t::NORMAL)
+                           .with_max_dur(1000));
+        size_t i = pair.first;
+        std::vector<ql::datum_t> p0, p10, rng;
+        p0 = pair.second.point_0->next_batch(&env, bs);
+        p10 = pair.second.point_10->next_batch(&env, bs);
+        rng = pair.second.range->next_batch(&env, bs);
+        if (i == 0) {
+            guarantee(p0.size() == 2);
+        } else {
+            guarantee(p0.size() == 1);
+        }
+        if (i <= 10) {
+            guarantee(p10.size() == 2);
+        } else {
+            guarantee(p10.size() == 1);
+        }
+        if (i <= 10) {
+            guarantee(rng.size() == 10 - i);
+        } else {
+            guarantee(rng.size() == 0);
+        }
+    }
 }
 
 }   /* namespace unittest */

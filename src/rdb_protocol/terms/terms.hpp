@@ -16,6 +16,12 @@ counted_t<term_t> make_arith_term(
     compile_env_t *env, const protob_t<const Term> &term);
 counted_t<term_t> make_mod_term(
     compile_env_t *env, const protob_t<const Term> &term);
+counted_t<term_t> make_floor_term(
+    compile_env_t *env, const protob_t<const Term> &term);
+counted_t<term_t> make_ceil_term(
+    compile_env_t *env, const protob_t<const Term> &term);
+counted_t<term_t> make_round_term(
+    compile_env_t *env, const protob_t<const Term> &term);
 
 // random.cc
 counted_t<term_t> make_sample_term(
@@ -58,13 +64,13 @@ counted_t<term_t> make_change_at_term(
     compile_env_t *env, const protob_t<const Term> &term);
 counted_t<term_t> make_splice_at_term(
     compile_env_t *env, const protob_t<const Term> &term);
-counted_t<term_t> make_indexes_of_term(
+counted_t<term_t> make_offsets_of_term(
     compile_env_t *env, const protob_t<const Term> &term);
 
 // control.cc
-counted_t<term_t> make_all_term(
+counted_t<term_t> make_and_term(
     compile_env_t *env, const protob_t<const Term> &term);
-counted_t<term_t> make_any_term(
+counted_t<term_t> make_or_term(
     compile_env_t *env, const protob_t<const Term> &term);
 counted_t<term_t> make_branch_term(
     compile_env_t *env, const protob_t<const Term> &term);
@@ -72,11 +78,12 @@ counted_t<term_t> make_funcall_term(
     compile_env_t *env, const protob_t<const Term> &term);
 
 // datum_terms.cc
-counted_t<term_t> make_datum_term(const protob_t<const Term> &term,
-                                  const configured_limits_t &limits);
+counted_t<term_t> make_datum_term(
+    const protob_t<const Term> &term,
+    const configured_limits_t &limits, reql_version_t reql_version);
 counted_t<term_t> make_constant_term(
     compile_env_t *env, const protob_t<const Term> &term,
-                                     double constant, const char *name);
+    double constant, const char *name);
 counted_t<term_t> make_make_array_term(
     compile_env_t *env, const protob_t<const Term> &term);
 counted_t<term_t> make_make_obj_term(
@@ -105,11 +112,15 @@ counted_t<term_t> make_table_drop_term(
     compile_env_t *env, const protob_t<const Term> &term);
 counted_t<term_t> make_table_list_term(
     compile_env_t *env, const protob_t<const Term> &term);
-counted_t<term_t> make_table_config_term(
+counted_t<term_t> make_config_term(
     compile_env_t *env, const protob_t<const Term> &term);
-counted_t<term_t> make_table_status_term(
+counted_t<term_t> make_status_term(
+    compile_env_t *env, const protob_t<const Term> &term);
+counted_t<term_t> make_wait_term(
     compile_env_t *env, const protob_t<const Term> &term);
 counted_t<term_t> make_reconfigure_term(
+    compile_env_t *env, const protob_t<const Term> &term);
+counted_t<term_t> make_rebalance_term(
     compile_env_t *env, const protob_t<const Term> &term);
 counted_t<term_t> make_sync_term(
     compile_env_t *env, const protob_t<const Term> &term);
@@ -223,6 +234,12 @@ counted_t<term_t> make_with_fields_term(
     compile_env_t *env, const protob_t<const Term> &term);
 
 // seq.cc
+counted_t<term_t> make_minval_term(
+    compile_env_t *env, const protob_t<const Term> &term);
+counted_t<term_t> make_maxval_term(
+    compile_env_t *env, const protob_t<const Term> &term);
+counted_t<term_t> make_between_deprecated_term(
+    compile_env_t *env, const protob_t<const Term> &term);
 counted_t<term_t> make_between_term(
     compile_env_t *env, const protob_t<const Term> &term);
 counted_t<term_t> make_changes_term(
@@ -303,7 +320,7 @@ counted_t<term_t> make_time_term(
     compile_env_t *env, const protob_t<const Term> &term);
 counted_t<term_t> make_portion_term(
     compile_env_t *env, const protob_t<const Term> &term,
-                                    pseudo::time_component_t component);
+    pseudo::time_component_t component);
 
 // type_manip.cc
 counted_t<term_t> make_coerce_term(

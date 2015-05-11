@@ -1,7 +1,7 @@
 from __future__ import print_function
 
 from copy import deepcopy
-import socket, sys, string
+import socket, sys, string, re
 
 try:
     import rethinkdb as r
@@ -74,3 +74,22 @@ def print_progress(ratio):
     print("\r[%s%s] %3d%%" % ("=" * done_width, " " * undone_width, int(100 * ratio)), end=' ')
     sys.stdout.flush()
 
+def check_minimum_version(progress, conn, minimum_version):
+    stringify_version = lambda v: '.'.join(map(str, v))
+    parsed_version = None
+    try:
+        version = r.db('rethinkdb').table('server_status')[0]['process']['version'].run(conn)
+        matches = re.match('rethinkdb (\d+)\.(\d+)\.(\d+)', version)
+        if matches == None:
+            raise RuntimeError("invalid version string format")
+        parsed_version = tuple(int(num) for num in matches.groups())
+        if parsed_version < minimum_version:
+            raise RuntimeError("incompatible version")
+    except (RuntimeError, TypeError, r.RqlRuntimeError):
+        if parsed_version is None:
+            message = "Error: Incompatible server version found, expected >= %s" % \
+                stringify_version(minimum_version)
+        else:
+            message = "Error: Incompatible server version found (%s), expected >= %s" % \
+                (stringify_version(parsed_version), stringify_version(minimum_version))
+        raise RuntimeError(message)

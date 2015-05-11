@@ -31,9 +31,11 @@ class term_t;
 
 /* If and optarg with the given key is present and is of type DATUM it will be
  * returned. Otherwise an empty datum_t will be returned. */
-datum_t static_optarg(const std::string &key, protob_t<Query> q);
+datum_t static_optarg(const std::string &key, const protob_t<const Query> q);
 
-std::map<std::string, wire_func_t> global_optargs(protob_t<Query> q);
+bool is_noreply(const protob_t<const Query> &q);
+
+std::map<std::string, wire_func_t> parse_global_optargs(protob_t<Query> q);
 
 class global_optargs_t {
 public:
@@ -52,9 +54,9 @@ profile_bool_t profile_bool_optarg(const protob_t<Query> &query);
 
 scoped_ptr_t<profile::trace_t> maybe_make_profile_trace(profile_bool_t profile);
 
-struct query_cache_t {
-    explicit query_cache_t(size_t cache_size) : regex_cache(cache_size) {}
-    lru_cache_t<std::string, std::shared_ptr<re2::RE2> > regex_cache;
+struct regex_cache_t {
+    explicit regex_cache_t(size_t cache_size) : regexes(cache_size) {}
+    lru_cache_t<std::string, std::shared_ptr<re2::RE2> > regexes;
 };
 
 class env_t : public home_thread_mixin_t {
@@ -62,6 +64,7 @@ public:
     // This is _not_ to be used for secondary index function evaluation -- it doesn't
     // take a reql_version parameter.
     env_t(rdb_context_t *ctx,
+          return_empty_normal_batches_t return_empty_normal_batches,
           signal_t *interruptor,
           std::map<std::string, wire_func_t> optargs,
           profile::trace_t *trace);
@@ -69,7 +72,9 @@ public:
     // Used in unittest and for some secondary index environments (hence the
     // reql_version parameter).  (For secondary indexes, the interruptor definitely
     // should be a dummy cond.)
-    explicit env_t(signal_t *interruptor, reql_version_t reql_version);
+    explicit env_t(signal_t *interruptor,
+                   return_empty_normal_batches_t return_empty_normal_batches,
+                   reql_version_t reql_version);
 
     ~env_t();
 
@@ -107,7 +112,7 @@ public:
 
     configured_limits_t limits() const { return limits_; }
 
-    query_cache_t & query_cache() { return cache_; }
+    regex_cache_t &regex_cache() { return regex_cache_; }
 
     reql_version_t reql_version() const { return reql_version_; }
 
@@ -125,9 +130,11 @@ private:
     const reql_version_t reql_version_;
 
     // query specific cache parameters; for example match regexes.
-    query_cache_t cache_;
+    regex_cache_t regex_cache_;
 
 public:
+    const return_empty_normal_batches_t return_empty_normal_batches;
+
     // The interruptor signal while a query evaluates.
     signal_t *const interruptor;
 
@@ -136,6 +143,7 @@ public:
 
     profile_bool_t profile() const;
 
+    rdb_context_t *get_rdb_ctx() { return rdb_ctx_; }
 private:
     static const uint32_t EVALS_BEFORE_YIELD = 256;
     uint32_t evals_since_yield_;

@@ -12,9 +12,10 @@
 #include "concurrency/auto_drainer.hpp"
 #include "concurrency/mutex.hpp"
 #include "concurrency/one_per_thread.hpp"
-#include "concurrency/watchable.hpp"
+#include "concurrency/watchable_map.hpp"
 #include "containers/archive/tcp_conn_stream.hpp"
 #include "containers/map_sentries.hpp"
+#include "concurrency/pump_coro.hpp"
 #include "perfmon/perfmon.hpp"
 #include "rpc/connectivity/peer_id.hpp"
 #include "utils.hpp"
@@ -36,7 +37,7 @@ public:
 };
 
 /* `connectivity_cluster_t` is responsible for establishing connections with other
-machines and communicating with them. It's the foundation of the entire clustering
+servers and communicating with them. It's the foundation of the entire clustering
 system. However, it's very low-level; most code will instead use the directory or mailbox
 mechanisms, which are built on top of `connectivity_cluster_t`.
 
@@ -63,7 +64,7 @@ public:
     static const std::string cluster_build_mode;
 
     /* Every clustering message has a "tag", which determines what message handler on the
-    destination machine will deal with it. Tags are a low-level concept, and there are
+    destination server will deal with it. Tags are a low-level concept, and there are
     only a few of them; for example, all directory-related messages have one tag, and all
     mailbox-related messages have another. Higher-level code uses the mailbox system for
     routing messages. */
@@ -75,8 +76,8 @@ public:
 
     class run_t;
 
-    /* `connection_t` represents an open connection to another machine. If we lose
-    contact with another machine and then regain it, then a new `connection_t` will be
+    /* `connection_t` represents an open connection to another server. If we lose
+    contact with another server and then regain it, then a new `connection_t` will be
     created. Generally, any code that handles a `connection_t *` will also carry around a
     `auto_drainer_t::lock_t` that ensures the connection object isn't destroyed while in
     use. This doubles as a mechanism for finding out when the connection has been lost;
@@ -88,13 +89,13 @@ public:
     thread and call the methods on any thread. */
     class connection_t : public home_thread_mixin_debug_only_t {
     public:
-        /* Returns the peer ID of the other machine. Peer IDs change when a node
+        /* Returns the peer ID of the other server. Peer IDs change when a node
         restarts, but not when it loses and then regains contact. */
         peer_id_t get_peer_id() {
             return peer_id;
         }
 
-        /* Returns the address of the other machine. */
+        /* Returns the address of the other server. */
         peer_address_t get_peer_address() {
             return peer_address;
         }
@@ -126,6 +127,10 @@ public:
 
         /* Unused for our connection to ourself */
         mutex_t send_mutex;
+
+        /* Calls `conn->flush_buffer()`. Can be used for making sure that a
+        buffered write makes it to the TCP stack. */
+        pump_coro_t flusher;
 
         perfmon_collection_t pm_collection;
         perfmon_sampler_t pm_bytes_sent;
@@ -159,7 +164,7 @@ public:
         its work in the background). */
         void join(const peer_address_t &address) THROWS_NOTHING;
 
-        std::set<ip_and_port_t> get_ips() const;
+        std::set<host_and_port_t> get_canonical_addresses();
         int get_port();
 
     private:
@@ -268,18 +273,18 @@ public:
     peer_id_t get_me() THROWS_NOTHING;
 
     /* This returns a watchable table of every active connection. The returned
-    `watchable_t` will be valid for the thread that `get_connections()` was called on. */
-    typedef std::map<peer_id_t, std::pair<connection_t *, auto_drainer_t::lock_t> >
-            connection_map_t;
-    clone_ptr_t<watchable_t<connection_map_t> > get_connections() THROWS_NOTHING;
+    `watchable_map_t` will be valid for the thread that `get_connections()` was called
+    on. */
+    typedef std::pair<connection_t *, auto_drainer_t::lock_t> connection_pair_t;
+    watchable_map_t<peer_id_t, connection_pair_t> *get_connections() THROWS_NOTHING;
 
     /* Shortcut if you just want to access one connection, which is by far the most
     common case. Returns `NULL` if there is no active connection to the given peer. */
     connection_t *get_connection(peer_id_t peer,
             auto_drainer_t::lock_t *keepalive_out) THROWS_NOTHING;
 
-    /* Sends a message to the other machine. The message is associated with a "tag",
-    which determines which message handler on the other machine will receive the message.
+    /* Sends a message to the other server. The message is associated with a "tag",
+    which determines which message handler on the other server will receive the message.
     */
     void send_message(connection_t *connection,
                       auto_drainer_t::lock_t connection_keepalive,
@@ -296,12 +301,14 @@ private:
     const peer_id_t me;
 
     /* `connections` holds open connections to other peers. It's the same on every
-    thread. It has an entry for every peer we are fully and officially connected to,
-    including us. That means it's a subset of the entries in `run_t::routing_table`. It
-    also holds an `auto_drainer_t::lock_t` for each connection; that way, the connection
-    can make sure nobody acquires a lock on its `auto_drainer_t` after it removes itself
-    from `connections`. */
-    one_per_thread_t<watchable_variable_t<connection_map_t> > connections;
+    thread, except that the `auto_drainer_t::lock_t`s on each thread correspond to the
+    thread-specific `auto_drainer_t`s in the `connection_t`. It has an entry for every
+    peer we are fully and officially connected to, including us. That means it's a subset
+    of the entries in `run_t::routing_table`. The only legal way to acquire a
+    connection's `auto_drainer_t` is through this map; this way, the connection can make
+    sure nobody acquires a lock on its `auto_drainer_t` after it removes itself from
+    `connections`. */
+    one_per_thread_t<watchable_map_var_t<peer_id_t, connection_pair_t> > connections;
 
     cluster_message_handler_t *message_handlers[max_message_tag];
 
@@ -327,6 +334,10 @@ public:
         return connectivity_cluster;
     }
     connectivity_cluster_t::message_tag_t get_message_tag() { return tag; }
+
+    peer_id_t get_me() {
+        return connectivity_cluster->get_me();
+    }
 
 protected:
     /* Registers the message handler with the cluster */

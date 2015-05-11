@@ -10,12 +10,12 @@
 #include "rdb_protocol/context.hpp"
 #include "rdb_protocol/protocol.hpp"
 
-const char *const sindex_blob_prefix = "$reql_index_function$";
-
+namespace ql {
 class datum_range_t;
-namespace ql { namespace changefeed {
+namespace changefeed {
 class client_t;
-} }
+}
+}
 
 /* `real_table_t` is a concrete subclass of `base_table_t` that routes its queries across
 the network via the clustering logic to a B-tree. The administration logic is responsible
@@ -50,7 +50,7 @@ private:
     threadnum_t thread;
 };
 
-class real_table_t FINAL : public base_table_t {
+class real_table_t final : public base_table_t {
 public:
     /* This doesn't automatically wait for readiness. */
     real_table_t(
@@ -61,31 +61,31 @@ public:
         uuid(_uuid), namespace_access(_namespace_access), pkey(_pkey),
         changefeed_client(_changefeed_client) { }
 
-    const std::string &get_pkey();
+    ql::datum_t get_id() const;
+    const std::string &get_pkey() const;
 
     ql::datum_t read_row(ql::env_t *env,
         ql::datum_t pval, bool use_outdated);
     counted_t<ql::datum_stream_t> read_all(
         ql::env_t *env,
         const std::string &sindex,
-        const ql::protob_t<const Backtrace> &bt,
+        ql::backtrace_id_t bt,
         const std::string &table_name,   /* the table's own name, for display purposes */
-        const datum_range_t &range,
+        const ql::datum_range_t &range,
         sorting_t sorting,
         bool use_outdated);
-    counted_t<ql::datum_stream_t> read_row_changes(
+    counted_t<ql::datum_stream_t> read_changes(
         ql::env_t *env,
-        ql::datum_t pval,
-        const ql::protob_t<const Backtrace> &bt,
-        const std::string &table_name);
-    counted_t<ql::datum_stream_t> read_all_changes(
-        ql::env_t *env,
-        const ql::protob_t<const Backtrace> &bt,
+        counted_t<ql::datum_stream_t> maybe_src,
+        const ql::datum_t &squash,
+        bool include_states,
+        ql::changefeed::keyspec_t::spec_t &&spec,
+        ql::backtrace_id_t bt,
         const std::string &table_name);
     counted_t<ql::datum_stream_t> read_intersecting(
         ql::env_t *env,
         const std::string &sindex,
-        const ql::protob_t<const Backtrace> &bt,
+        ql::backtrace_id_t bt,
         const std::string &table_name,
         bool use_outdated,
         const ql::datum_t &query_geometry);
@@ -112,21 +112,6 @@ public:
         durability_requirement_t durability);
     bool write_sync_depending_on_durability(ql::env_t *env,
         durability_requirement_t durability);
-
-    bool sindex_create(ql::env_t *env,
-        const std::string &id,
-        counted_t<const ql::func_t> index_func,
-        sindex_multi_bool_t multi,
-        sindex_geo_bool_t geo);
-    bool sindex_drop(ql::env_t *env,
-        const std::string &id);
-    sindex_rename_result_t sindex_rename(ql::env_t *env,
-        const std::string &old_name,
-        const std::string &new_name,
-        bool overwrite);
-    std::vector<std::string> sindex_list(ql::env_t *env);
-    std::map<std::string, ql::datum_t> sindex_status(ql::env_t *env,
-        const std::set<std::string> &sindexes);
 
     /* These are not part of the `base_table_t` interface. They wrap the `read()`,
     `read_outdated()`, and `write()` methods of the underlying `namespace_interface_t` to

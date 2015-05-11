@@ -5,6 +5,8 @@
 
 #include "clustering/generic/raft_core.hpp"
 #include "clustering/generic/raft_core.tcc"
+#include "clustering/generic/raft_network.hpp"
+#include "clustering/generic/raft_network.tcc"
 #include "unittest/clustering_utils.hpp"
 #include "unittest/unittest_utils.hpp"
 
@@ -27,6 +29,7 @@ public:
         return state != other.state;
     }
 };
+RDB_MAKE_SERIALIZABLE_1(dummy_raft_state_t, state);
 
 typedef raft_member_t<dummy_raft_state_t> dummy_raft_member_t;
 
@@ -46,6 +49,9 @@ public:
                 size_t num,
                 const dummy_raft_state_t &initial_state,
                 std::vector<raft_member_id_t> *member_ids_out) :
+            mailbox_manager(&connectivity_cluster, 'M'),
+            connectivity_cluster_run(&connectivity_cluster, get_unittest_addresses(),
+                peer_address_t(), ANY_PORT, 0),
             check_invariants_timer(100, [this]() {
                 coro_t::spawn_sometime(std::bind(
                     &dummy_raft_cluster_t::check_invariants,
@@ -55,7 +61,7 @@ public:
     {
         raft_config_t initial_config;
         for (size_t i = 0; i < num; ++i) {
-            raft_member_id_t member_id = generate_uuid();
+            raft_member_id_t member_id(generate_uuid());
             if (member_ids_out) {
                 member_ids_out->push_back(member_id);
             }
@@ -84,35 +90,28 @@ public:
         bool found_init_state = false;
         for (const auto &pair : members) {
             if (pair.second->member_drainer.has()) {
-                init_state = pair.second->member->get_state_for_init();
+                init_state = pair.second->member->get_raft()->get_state_for_init();
                 found_init_state = true;
                 break;
             }
         }
         guarantee(found_init_state, "Can't add a new node to a cluster with no living "
             "members.");
-        raft_member_id_t member_id = generate_uuid();
+        raft_member_id_t member_id(generate_uuid());
         add_member(member_id, init_state);
         return member_id;
     }
 
     /* `set_live()` puts the given member into the given state. */
     void set_live(const raft_member_id_t &member_id, live_t live) {
-        switch (live) {
-            case live_t::alive:
-                debugf("%s state alive\n", uuid_to_str(member_id).substr(0,4).c_str());
-                break;
-            case live_t::isolated:
-                debugf("%s state isolated\n", uuid_to_str(member_id).substr(0,4).c_str());
-                break;
-            case live_t::dead:
-                debugf("%s state dead\n", uuid_to_str(member_id).substr(0,4).c_str());
-                break;
-            default: unreachable();
-        }
         member_info_t *i = members.at(member_id).get();
         if (i->rpc_drainer.has() && live != live_t::alive) {
-            alive_members.delete_key(member_id);
+            member_directory.delete_key(member_id);
+            /* The reason we don't just do `i->rpc_drainer.reset()` is that if something
+            were to read `i->rpc_drainer` while the `auto_drainer_t` destructor was
+            blocking, it might get a pointer to an invalid `auto_drainer_t` instead of
+            getting a null pointer. This workaround ensures that `i->rpc_drainer` will
+            always either be valid or null. */
             scoped_ptr_t<auto_drainer_t> dummy;
             std::swap(i->rpc_drainer, dummy);
             dummy.reset();
@@ -125,14 +124,16 @@ public:
                 i->member.reset();
             }
             if (!i->member.has() && live != live_t::dead) {
-                i->member.init(new dummy_raft_member_t(
-                    member_id, i, i, i->stored_state));
+                i->member.init(new raft_networked_member_t<dummy_raft_state_t>(
+                    member_id, &mailbox_manager, &member_directory, i, i->stored_state,
+                    ""));
                 i->member_drainer.init(new auto_drainer_t);
             }
         }
         if (!i->rpc_drainer.has() && live == live_t::alive) {
             i->rpc_drainer.init(new auto_drainer_t);
-            alive_members.set_key(member_id, nullptr);
+            member_directory.set_key_no_equals(
+                member_id, i->member->get_business_card());
         }
     }
 
@@ -142,7 +143,8 @@ public:
         while (true) {
             for (const auto &pair : members) {
                 if (pair.second->member_drainer.has() &&
-                        pair.second->member->get_readiness_for_change()->get()) {
+                        pair.second->member->get_raft()->
+                            get_readiness_for_change()->get()) {
                     return pair.first;
                 }
             }
@@ -172,7 +174,52 @@ public:
                 /* `interruptor2` is only pulsed when the member is being destroyed, so
                 it's safe to pass as the `hard_interruptor` parameter */
                 try {
-                    res = member->propose_change(change, interruptor, interruptor2);
+                    scoped_ptr_t<raft_member_t<dummy_raft_state_t>::change_token_t> tok;
+                    {
+                        raft_member_t<dummy_raft_state_t>::change_lock_t change_lock(
+                            member, interruptor);
+                        tok = member->propose_change(&change_lock, change, interruptor2);
+                    }
+                    if (!tok.has()) {
+                        return;
+                    }
+                    wait_interruptible(tok->get_ready_signal(), interruptor);
+                    res = tok->wait();
+                } catch (const interrupted_exc_t &) {
+                    if (interruptor2->is_pulsed()) {
+                        throw;
+                    }
+                }
+            }
+        });
+        if (interruptor->is_pulsed()) {
+            throw interrupted_exc_t();
+        }
+        return res;
+    }
+
+    /* Like `try_change()` but for Raft configuration changes */
+    bool try_config_change(raft_member_id_t id, const raft_config_t &new_config,
+            signal_t *interruptor) {
+        bool res;
+        run_on_member(id, [&](dummy_raft_member_t *member, signal_t *interruptor2) {
+            res = false;
+            if (member != nullptr) {
+                /* `interruptor2` is only pulsed when the member is being destroyed, so
+                it's safe to pass as the `hard_interruptor` parameter */
+                try {
+                    scoped_ptr_t<raft_member_t<dummy_raft_state_t>::change_token_t> tok;
+                    {
+                        raft_member_t<dummy_raft_state_t>::change_lock_t change_lock(
+                            member, interruptor);
+                        tok = member->propose_config_change(
+                            &change_lock, new_config, interruptor2);
+                    }
+                    if (!tok.has()) {
+                        return;
+                    }
+                    wait_interruptible(tok->get_ready_signal(), interruptor);
+                    res = tok->wait();
                 } catch (const interrupted_exc_t &) {
                     if (interruptor2->is_pulsed()) {
                         throw;
@@ -206,7 +253,7 @@ public:
         if (i->member_drainer.has()) {
             auto_drainer_t::lock_t keepalive = i->member_drainer->lock();
             try {
-                fun(i->member.get(), keepalive.get_drain_signal());
+                fun(i->member->get_raft(), keepalive.get_drain_signal());
             } catch (const interrupted_exc_t &) {
                 /* do nothing */
             }
@@ -218,64 +265,14 @@ public:
 
 private:
     class member_info_t :
-        public raft_storage_interface_t<dummy_raft_state_t>,
-        public raft_network_interface_t<dummy_raft_state_t> {
+        public raft_storage_interface_t<dummy_raft_state_t> {
     public:
         member_info_t() { }
         member_info_t(member_info_t &&) = default;
         member_info_t &operator=(member_info_t &&) = default;
 
-        /* These are the methods for `raft_{network,storage}_interface_t`. */
-        bool send_rpc(
-                const raft_member_id_t &dest,
-                const raft_rpc_request_t<dummy_raft_state_t> &request,
-                signal_t *interruptor,
-                raft_rpc_reply_t *reply_out) {
-            /* This is convoluted because if `interruptor` is pulsed, we want to return
-            immediately but we don't want to pulse the interruptor for `on_rpc()`. So we
-            have to spawn a separate coroutine for `on_rpc()`. The coroutine communicates
-            with `send_rpc()` through `reply_info_t`, which is stored on the heap so it
-            remains valid even if `send_rpc()` is interrupted. */
-            class reply_info_t {
-            public:
-                cond_t done;
-                bool ok;
-                raft_rpc_reply_t reply;
-            };
-            std::shared_ptr<reply_info_t> reply_info(new reply_info_t);
-            block(interruptor);
-            coro_t::spawn_sometime(
-                [this, dest, request, reply_info] () {
-                    member_info_t *other = parent->members.at(dest).get();
-                    if (other->rpc_drainer.has()) {
-                        auto_drainer_t::lock_t keepalive(other->rpc_drainer.get());
-                        try {
-                            block(keepalive.get_drain_signal());
-                            other->member->on_rpc(request, keepalive.get_drain_signal(),
-                                &reply_info->reply);
-                            block(keepalive.get_drain_signal());
-                            reply_info->ok = true;
-                        } catch (interrupted_exc_t) {
-                            reply_info->ok = false;
-                        }
-                    } else {
-                        reply_info->ok = false;
-                    }
-                    reply_info->done.pulse();
-                });
-            wait_interruptible(&reply_info->done, interruptor);
-            block(interruptor);
-            if (reply_info->ok) {
-                *reply_out = reply_info->reply;
-            }
-            return reply_info->ok;
-        }
-        watchable_map_var_t<raft_member_id_t, std::nullptr_t> *get_connected_members() {
-            return &parent->alive_members;
-        }
         void write_persistent_state(
-                const raft_persistent_state_t<dummy_raft_state_t> &
-                    persistent_state,
+                const raft_persistent_state_t<dummy_raft_state_t> &persistent_state,
                 signal_t *interruptor) {
             block(interruptor);
             stored_state = persistent_state;
@@ -298,7 +295,7 @@ private:
         /* If the member is alive, `member`, `member_drainer`, and `rpc_drainer` are set.
         If the member is isolated, `member` and `member_drainer` are set but
         `rpc_drainer` is empty. If the member is dead, all are empty. */
-        scoped_ptr_t<dummy_raft_member_t> member;
+        scoped_ptr_t<raft_networked_member_t<dummy_raft_state_t> > member;
         scoped_ptr_t<auto_drainer_t> member_drainer, rpc_drainer;
     };
 
@@ -319,14 +316,19 @@ private:
         for (auto &pair : members) {
             if (pair.second->member_drainer.has()) {
                 keepalives.push_back(pair.second->member_drainer->lock());
-                member_ptrs.insert(pair.second->member.get());
+                member_ptrs.insert(pair.second->member->get_raft());
             }
         }
         dummy_raft_member_t::check_invariants(member_ptrs);
     }
 
+    connectivity_cluster_t connectivity_cluster;
+    mailbox_manager_t mailbox_manager;
+    connectivity_cluster_t::run_t connectivity_cluster_run;
+
     std::map<raft_member_id_t, scoped_ptr_t<member_info_t> > members;
-    watchable_map_var_t<raft_member_id_t, std::nullptr_t> alive_members;
+    watchable_map_var_t<raft_member_id_t, raft_business_card_t<dummy_raft_state_t> >
+        member_directory;
     auto_drainer_t drainer;
     repeating_timer_t check_invariants_timer;
 };
@@ -353,7 +355,7 @@ public:
             all_changes.insert(change);
         }
         for (const uuid_u &change : committed_changes) {
-            ASSERT_TRUE(all_changes.count(change) == 1);
+            ASSERT_EQ(1, all_changes.count(change));
         }
     }
 
@@ -399,40 +401,63 @@ TPTEST(ClusteringRaft, Basic) {
 }
 
 TPTEST(ClusteringRaft, Failover) {
-    debugf("failover test begin\n");
     std::vector<raft_member_id_t> member_ids;
     dummy_raft_cluster_t cluster(5, dummy_raft_state_t(), &member_ids);
     dummy_raft_traffic_generator_t traffic_generator(&cluster, 3);
     raft_member_id_t leader = cluster.find_leader(60000);
-    debugf("failover elected 1st leader\n");
     do_writes(&cluster, leader, 2000, 100);
-    debugf("failover did 1st writes\n");
     cluster.set_live(member_ids[0], dummy_raft_cluster_t::live_t::dead);
     cluster.set_live(member_ids[1], dummy_raft_cluster_t::live_t::dead);
     leader = cluster.find_leader(60000);
-    debugf("failover elected 2nd leader\n");
     do_writes(&cluster, leader, 2000, 100);
-    debugf("failover did 2nd writes\n");
     cluster.set_live(member_ids[2], dummy_raft_cluster_t::live_t::dead);
     cluster.set_live(member_ids[3], dummy_raft_cluster_t::live_t::dead);
     cluster.set_live(member_ids[0], dummy_raft_cluster_t::live_t::alive);
     cluster.set_live(member_ids[1], dummy_raft_cluster_t::live_t::alive);
     leader = cluster.find_leader(60000);
-    debugf("failover elected 3rd leader\n");
     do_writes(&cluster, leader, 2000, 100);
-    debugf("failover did 3rd writes\n");
     cluster.set_live(member_ids[4], dummy_raft_cluster_t::live_t::dead);
     cluster.set_live(member_ids[2], dummy_raft_cluster_t::live_t::alive);
     cluster.set_live(member_ids[3], dummy_raft_cluster_t::live_t::alive);
     leader = cluster.find_leader(60000);
-    debugf("failover elected 4th leader\n");
     do_writes(&cluster, leader, 2000, 100);
-    debugf("failover did 4th writes\n");
     ASSERT_LT(100, traffic_generator.get_num_changes());
     cluster.run_on_member(leader, [&](dummy_raft_member_t *member, signal_t *) {
         dummy_raft_state_t state = member->get_committed_state()->get().state;
         traffic_generator.check_changes_present(state);
     });
+}
+
+TPTEST(ClusteringRaft, MemberChange) {
+    std::vector<raft_member_id_t> member_ids;
+    size_t cluster_size = 5;
+    dummy_raft_cluster_t cluster(cluster_size, dummy_raft_state_t(), &member_ids);
+    dummy_raft_traffic_generator_t traffic_generator(&cluster, 3);
+    for (size_t i = 0; i < 10; ++i) {
+        /* Do some test writes */
+        raft_member_id_t leader = cluster.find_leader(10000);
+        do_writes(&cluster, leader, 2000, 10);
+
+        /* Kill one member and do some more test writes */
+        cluster.set_live(member_ids[i], dummy_raft_cluster_t::live_t::dead);
+        leader = cluster.find_leader(10000);
+        do_writes(&cluster, leader, 2000, 10);
+
+        /* Add a replacement member and do some more test writes */
+        member_ids.push_back(cluster.join());
+        do_writes(&cluster, leader, 2000, 10);
+
+        /* Update the configuration and do some more test writes */
+        raft_config_t new_config;
+        for (size_t n = i+1; n < i+1+cluster_size; ++n) {
+            new_config.voting_members.insert(member_ids[n]);
+        }
+        signal_timer_t timeout;
+        timeout.start(10000);
+        cluster.try_config_change(leader, new_config, &timeout);
+        do_writes(&cluster, leader, 2000, 10);
+    }
+    ASSERT_LT(100, traffic_generator.get_num_changes());
 }
 
 }   /* namespace unittest */

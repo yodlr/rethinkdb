@@ -22,31 +22,31 @@ class artificial_table_t : public base_table_t {
 public:
     explicit artificial_table_t(artificial_table_backend_t *_backend);
 
-    const std::string &get_pkey();
+    ql::datum_t get_id() const;
+    const std::string &get_pkey() const;
 
     ql::datum_t read_row(ql::env_t *env,
         ql::datum_t pval, bool use_outdated);
     counted_t<ql::datum_stream_t> read_all(
         ql::env_t *env,
         const std::string &get_all_sindex_id,
-        const ql::protob_t<const Backtrace> &bt,
+        ql::backtrace_id_t bt,
         const std::string &table_name,   /* the table's own name, for display purposes */
-        const datum_range_t &range,
+        const ql::datum_range_t &range,
         sorting_t sorting,
         bool use_outdated);
-    counted_t<ql::datum_stream_t> read_row_changes(
+    counted_t<ql::datum_stream_t> read_changes(
         ql::env_t *env,
-        ql::datum_t pval,
-        const ql::protob_t<const Backtrace> &bt,
-        const std::string &table_name);
-    counted_t<ql::datum_stream_t> read_all_changes(
-        ql::env_t *env,
-        const ql::protob_t<const Backtrace> &bt,
+        counted_t<ql::datum_stream_t> maybe_src,
+        const ql::datum_t &, // TODO: implement squash
+        bool include_states,
+        ql::changefeed::keyspec_t::spec_t &&spec,
+        ql::backtrace_id_t bt,
         const std::string &table_name);
     counted_t<ql::datum_stream_t> read_intersecting(
         ql::env_t *env,
         const std::string &sindex,
-        const ql::protob_t<const Backtrace> &bt,
+        ql::backtrace_id_t bt,
         const std::string &table_name,
         bool use_outdated,
         const ql::datum_t &query_geometry);
@@ -73,16 +73,6 @@ public:
         durability_requirement_t durability);
     bool write_sync_depending_on_durability(ql::env_t *env,
         durability_requirement_t durability);
-
-    bool sindex_create(ql::env_t *env, const std::string &id,
-        counted_t<const ql::func_t> index_func, sindex_multi_bool_t multi,
-        sindex_geo_bool_t geo);
-    bool sindex_drop(ql::env_t *env, const std::string &id);
-    sindex_rename_result_t sindex_rename(ql::env_t *env,
-        const std::string &old_name, const std::string &new_name, bool overwrite);
-    std::vector<std::string> sindex_list(ql::env_t *env);
-    std::map<std::string, ql::datum_t> sindex_status(ql::env_t *env,
-        const std::set<std::string> &sindexes);
 
 private:
     /* `do_single_update()` can throw `interrupted_exc_t`, but it shouldn't throw query

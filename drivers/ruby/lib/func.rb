@@ -25,7 +25,7 @@ module RethinkDB
       :between => 2,
       :table => -1,
       :table_create => -1,
-      :reconfigure => 2,
+      :reconfigure => 0,
       :get_all => -1,
       :eq_join => -1,
       :javascript => -1,
@@ -33,6 +33,7 @@ module RethinkDB
       :slice => -1,
       :during => -1,
       :orderby => -1,
+      :order_by => -1,
       :group => -1,
       :iso8601 => -1,
       :index_create => -1,
@@ -43,7 +44,11 @@ module RethinkDB
       :distance => -1,
       :circle => -1,
       :get_intersecting => -1,
-      :get_nearest => -1
+      :get_nearest => -1,
+      :min => -1,
+      :max => -1,
+      :changes => -1,
+      :wait => 0
     }
     @@method_aliases = {
       :lt => :<,
@@ -55,8 +60,8 @@ module RethinkDB
       :mul => :*,
       :div => :/,
       :mod => :%,
-      :any => [:"|", :or],
-      :all => [:"&", :and],
+      :or => :"|",
+      :and => :"&",
       :order_by => :orderby,
       :concat_map => :concatmap,
       :for_each => :foreach,
@@ -77,7 +82,7 @@ module RethinkDB
 
         if [:<, :<=, :>, :>=, :+, :-, :*, :/, :%].include?(__method__)
           a.each {|arg|
-            if arg.class == RQL && arg.bitop
+            if arg.is_a?(RQL) && arg.bitop
               err = "Calling #{__method__} on result of infix bitwise operator:\n" +
                 "#{arg.inspect}.\n" +
                 "This is almost always a precedence error.\n" +
@@ -89,7 +94,7 @@ module RethinkDB
         end
 
         if (opt_offset = @@optarg_offsets[termtype.downcase])
-          if opt_offset.class == Hash
+          if opt_offset.is_a?(Hash)
             opt_offset = opt_offset[b ? :with_block : :without]
           end
           # TODO: This should drop the Hash comparison or at least
@@ -97,7 +102,7 @@ module RethinkDB
           # Any time one of these operations is changed to support a
           # hash argument, we'll have to remember to fix
           # @@optarg_offsets, otherwise.
-          optargs = a.delete_at(opt_offset) if a[opt_offset].class == Hash
+          optargs = a.delete_at(opt_offset) if a[opt_offset].is_a?(Hash)
         end
 
         args = ((@body != RQL) ? [self] : []) + a + (b ? [new_func(&b)] : [])
@@ -126,7 +131,7 @@ module RethinkDB
     def -@; RQL.new.sub(0, self); end
 
     def [](ind)
-      if ind.class == Range
+      if ind.is_a?(Range)
         return slice(ind.begin, ind.end, :right_bound =>
                      (ind.exclude_end? ? 'open' : 'closed'))
       else

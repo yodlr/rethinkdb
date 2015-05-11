@@ -36,6 +36,8 @@ enum class batch_type_t {
 ARCHIVE_PRIM_MAKE_RANGED_SERIALIZABLE(
     batch_type_t, int8_t, batch_type_t::NORMAL, batch_type_t::SINDEX_CONSTANT);
 
+enum ignore_latency_t { NO, YES };
+
 class batcher_t {
 public:
     bool note_el(const datum_t &t) {
@@ -45,7 +47,8 @@ public:
         size_left -= serialized_size<cluster_version_t::CLUSTER>(t);
         return should_send_batch();
     }
-    bool should_send_batch() const;
+    bool should_send_batch(
+        ignore_latency_t ignore_latency = ignore_latency_t::NO) const;
     batcher_t(batcher_t &&other) :
         batch_type(std::move(other.batch_type)),
         seen_one_el(std::move(other.seen_one_el)),
@@ -78,21 +81,23 @@ public:
     static batchspec_t default_for(batch_type_t batch_type);
     batch_type_t get_batch_type() const { return batch_type; }
     batchspec_t with_new_batch_type(batch_type_t new_batch_type) const;
+    batchspec_t with_max_dur(int64_t new_max_dur) const;
     batchspec_t with_at_most(uint64_t max_els) const;
     batchspec_t scale_down(int64_t divisor) const;
     batcher_t to_batcher() const;
 
 private:
-    template<cluster_version_t W>
-    friend void serialize(write_message_t *, const batchspec_t &);
-    template<cluster_version_t W>
-    friend archive_result_t deserialize(read_stream_t *, batchspec_t *);
     // I made this private and accessible through a static function because it
     // was being accidentally default-initialized.
     batchspec_t() { } // USE ONLY FOR SERIALIZATION
     batchspec_t(batch_type_t batch_type, int64_t min_els, int64_t max_els,
                 int64_t max_size, int64_t first_scaledown,
                 int64_t max_dur, microtime_t start_time);
+
+    template<cluster_version_t W>
+    friend void serialize(write_message_t *wm, const batchspec_t &batchspec);
+    template<cluster_version_t W>
+    friend archive_result_t deserialize(read_stream_t *s, batchspec_t *batchspec);
 
     batch_type_t batch_type;
     int64_t min_els, max_els, max_size, first_scaledown_factor, max_dur;

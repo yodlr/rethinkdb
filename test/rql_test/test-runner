@@ -4,41 +4,93 @@
 
 from __future__ import print_function
 
-import atexit, collections, distutils.version, distutils.spawn, optparse, os, re, shutil, signal, stat, string, subprocess, sys, tempfile, time, traceback
+import atexit, collections, copy, distutils.version, distutils.spawn, optparse, os
+import re, resource, shutil, signal, stat, string, subprocess, sys, tempfile, threading, time, traceback, warnings
 
 try:
     import yaml
 except ImportError:
-    sys.exit('%s requires that PyYAML be installed' % os.path.basename(__file__))
+    sys.exit('%s requires that PyYAML be installed: https://pypi.python.org/pypi/PyYAML' % os.path.basename(__file__))
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), os.pardir, "common"))
-import test_exceptions, utils
-sys.path.insert(0, os.path.dirname(__file__))
-import test_util
+import driver, test_exceptions, utils
 
 try:
     unicode
 except NameError:
     unicode = str
+try:
+    import Queue
+except ImportError:
+    import queue as Queue
+
+# -- ensure we can open enough files
+
+try:
+    openFileLimit = int(os.getenv('OPEN_FILE_LIMIT', 512))
+    if resource.getrlimit(resource.RLIMIT_NOFILE)[0] < openFileLimit:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (openFileLimit, openFileLimit))
+except Exception, e:
+    sys.exit('Bad OPEN_FILE_LIMIT input: %s' % os.getenv('OPEN_FILE_LIMIT'))
 
 # -- settings
 
-testGroupSeperator = '/'
 testExtensions = ['test', 'yaml']
+
+r = utils.import_python_driver()
+
+print_debug = False
+
+# -- set the default tempfolder to a generated folder in this directory
+
+tempfile.tempdir = tempfile.mkdtemp(prefix='.rethinkdbTestTemp-', dir=os.getcwd())
+utils.cleanupPathAtExit(tempfile.tempdir)
+
+# -- internal global variables
+
+testLock = threading.Lock()
+
+# -- signal and atexit handlers
+
+runningProcessGroupsIds = []
+def cleanupProcessGroups():
+    '''fired by atexit or a signal handler, this should make sure we don't leave processes running'''
+    
+    for processGroupId in runningProcessGroupsIds:
+        try:
+            utils.kill_process_group(processGroupId)
+        except Exception as e:
+            raise Warning('Unable to shut down server: %s' % str(e))
+atexit.register(cleanupProcessGroups)
+
+cancelRun = False
+def setCancelRun(*args):
+    global cancelRun
+    cancelRun = True
+signal.signal(signal.SIGINT, setCancelRun)
+# ToDo: cover all relevant signals
+# ToDo: allow for double-SIGINT to fast-kill
 
 # --
 
-# A test script src language
-# This class attempts to abstract some of the details that
-# separate our source languages.
+def debug(message):
+    if print_debug:
+        sys.stdout.write('DEBUG: %s' % message.rstrip())
+
+# --
+
+# This class attempts to abstract some of the details that separate our source languages.
 class SrcLang(object):
     test_types = None
     display_name = None
 
     interpreter_name_exe_names = None
-    interpreter_path = None
+    _interpreter_path = None
     interpreter_version = None
     interpreter_env_name = None
+    
+    __polyglot_language_header = None
+    _polyglot_language_header_path = None
     
     driver_source_path = None
     driver_build_env_name = None
@@ -46,11 +98,21 @@ class SrcLang(object):
     
     instance_setup = False
     
+    none_string = 'None'
+    line_comment = '#'
+    
+    lang_replaces = {}
+    lang_regex = None # set in __new__
+    
     # -- class variables
     
     _singletons = {}
     
     def __new__(cls, version=''):
+        
+        if cls.lang_regex == None:
+            cls.lang_regex = re.compile(r'''(?P<quoteChar>["']?)\b(?P<target>%s)\b(?P=quoteChar)''' % '|'.join(cls.lang_replaces.keys()))
+        
         singletonName = cls.__name__
         if version not in (None, ''):
             singletonName = "%s-%s" % (cls.__name__, str(version))
@@ -60,49 +122,46 @@ class SrcLang(object):
     
     def __init__(self):
         self.instance_setup = True
-    
-    # Returns the approriate line comment string
-    def comment(self):
-        return "#"
-
-    # Converts input value into the appropriate string
-    # representation for this language.
-    def langrepr(self, val):
-        return repr(str(val))
 
     # Translates names from canonical name representation
     # (underscores) to the convention for this language
     def nametranslate(self, name):
-        return name
+        return name.replace('__', '_')
 
-    # Translates dictionary (object) representation from cannonical
+    # Translates dictionary (object) representation from canonical
     # form (e.g. "{'a':1}") to the appropriate representation for this
     # language
-    def dicttranslate(self, dic):
+    def dict_translate(self, dic):
         return dic
 
-    # Translates 'null' to langauge equivalents
-    def nulltranslate(self, strng):
-        return strng
-
-    # Translate a generic code string using the rules defined by `self`
-    def translate_query(self, src, encode=True):
-        encoded = src
-        if encode is True:
-             encoded = self.langrepr(src)
-        return self.dicttranslate(self.nametranslate(self.nulltranslate(encoded)))
-
-    # Translate an expected value
-    def translate_expected(self, src):
-        return self.dicttranslate(self.nulltranslate(self.langrepr(src)))
+    @classmethod
+    def term_translate(cls, content):
+        '''translate language-specific terms, unless alone in quotes or part of a word'''
+        
+        def termTranslateFunction(match):
+            if match.group('quoteChar') in (None, ''):
+                return cls.lang_replaces.get(match.group('target')) or match.group('target')
+            else:
+                return match.group()
+        return cls.lang_regex.sub(termTranslateFunction, content)
     
-    def get_interpreter_path(self):
+    # Translate a generic code string using the rules defined by `self`
+    def translate_query(self, src, quote=True, name=False):
+        result = self.dict_translate(self.term_translate(unicode(src).strip()))
+        if name:
+            result = self.nametranslate(result)
+        if quote:
+            result = repr(result)
+            if len(result) > 1 and result[:2] in ('u"', "u'"):
+                result = result[1:]
+        return result
+    
+    @property
+    def interpreter_path(self):
         '''return the path to the interpreter on this system, respecting the given env variable'''
         
-        if self.interpreter_path is not None:
-            if not os.access(self.interpreter_path, os.X_OK):
-                raise test_exceptions.TestingFrameworkException(detail='The interperter %s is not executable' % self.interpreter_path)
-            return self.interpreter_path        
+        if self._interpreter_path is not None:
+            return self._interpreter_path 
         
         if self.interpreter_name_exe_names is None or self.interpreter_name_exe_names == []:
             raise NotImplementedError('interpreter_name_exe_names is not implemented as required for the SrcLang subclass: %s' % self.__class__.__name__)
@@ -121,16 +180,19 @@ class SrcLang(object):
                     except Exception:
                         pass
         else:
-            self.interpreter_version = self.version_check(executablePath) # execption on failure
+            self.interpreter_version = self.version_check(executablePath) # exception on failure
             
         if executablePath is None:
-            raise test_exceptions.TestingFrameworkException(detail='Unable to find interperter %s' % self.display_name)
+            raise test_exceptions.TestingFrameworkException(detail='Unable to find interpreter %s' % self.display_name)
         
-        self.interpreter_path = executablePath
-        return self.interpreter_path
+        if not os.access(executablePath, os.X_OK):
+            raise test_exceptions.TestingFrameworkException(detail='The interpreter %s is not executable' % executablePath)
+        
+        self._interpreter_path = executablePath
+        return self._interpreter_path
     
     def get_interpreter_version(self, executablePath):
-        '''Return the version string for this interpreter, this must be implimented by subclasses'''
+        '''Return the version string for this interpreter, this must be implemented by subclasses'''
         raise NotImplementedError('version_check is not implemented as required for the SrcLang subclass: %s' % self.__class__.__name__)
     
     def version_check(self, executablePath):
@@ -139,12 +201,19 @@ class SrcLang(object):
         targetVersion = self.get_interpreter_version(executablePath)
         
         if self.minVersion is not None and targetVersion < self.minVersion:
-            raise test_exceptions.TestingFrameworkException(detail='Version of %s (%s) was below the minuimum version %s' % (executablePath, targetVersion, self.minVersion))
+            raise test_exceptions.TestingFrameworkException(detail='Version of %s (%s) was below the minimum version %s' % (executablePath, targetVersion, self.minVersion))
         
         if self.maxVersion is not None and targetVersion > self.maxVersion:
             raise test_exceptions.TestingFrameworkException(detail='Version of %s (%s) was above the maximum version %s for python2' % (executablePath, targetVersion, self.maxVersion))
         
         return targetVersion
+    
+    @property
+    def polyglot_language_header(self):
+        if self.__polyglot_language_header is None:
+            with open(self._polyglot_language_header_path, 'rU') as headerFile:
+                self.__class__.__polyglot_language_header = headerFile.read().decode('utf-8')
+        return self.__polyglot_language_header
 
 class PyLang(SrcLang):
     test_types = None
@@ -155,11 +224,16 @@ class PyLang(SrcLang):
     minVersion = None
     maxVersion = None
     
-    driver_source_path = os.getenv('PYTHON_DRIVER_SRC_DIR') or os.path.join(utils.project_root_dir(), 'drivers', 'python')
+    driver_source_path = os.getenv('PYTHON_DRIVER_SRC_DIR') or os.path.join(utils.project_root_dir, 'drivers', 'python')
     driver_build_env_name = 'PYTHON_DRIVER_DIR'
-    driver_build_path = os.getenv('PYTHON_DRIVER_DIR') or os.path.join(utils.project_root_dir(), 'build', 'drivers', 'python')
+    driver_build_path = os.getenv('PYTHON_DRIVER_DIR') or os.path.join(utils.project_root_dir, 'build', 'drivers', 'python')
     
-    polyglot_language_header = os.path.join(os.path.dirname(__file__), 'drivers', 'driver.py')
+    _polyglot_language_header_path = os.path.join(os.path.dirname(__file__), 'drivers', 'driver.py')
+    
+    lang_replaces = {
+        'null': 'None',
+        'nil': 'None'
+    }
     
     def __init__(self, version, interpreter_env_name='PYTHON'):
         if self.instance_setup is True:
@@ -189,20 +263,6 @@ class PyLang(SrcLang):
         self.test_types.append('py')
         self.interpreter_name_exe_names.append('python')
     
-    def langrepr(self, val):
-        encoded = None
-        if not isinstance(val, unicode):
-            encoded = repr(str(val))
-        else:
-            encoded = repr(unicode(val))
-        if distutils.version.LooseVersion('3.0') <= self.interpreter_version and self.interpreter_version < distutils.version.LooseVersion('3.3'):
-            if len(encoded) > 2 and encoded[:2] in ('u"', "u'"):
-                encoded = encoded[1:]
-        return encoded
-    
-    def nulltranslate(self, strng):
-        return re.sub("(?<!\"|')null(?!\"|')", 'None', strng)
-    
     def get_interpreter_version(self, executablePath):
         versionCheckProcess = subprocess.Popen([executablePath, '--version'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         output, __ = versionCheckProcess.communicate()
@@ -225,31 +285,44 @@ class JsLang(SrcLang):
     minVersion = None # no version requirements yet
     maxVersion = None
     
-    driver_source_path = os.getenv('JAVASCRIPT_DRIVER_SRC_DIR') or os.path.join(utils.project_root_dir(), 'drivers', 'javascript')
+    driver_source_path = os.getenv('JAVASCRIPT_DRIVER_SRC_DIR') or os.path.join(utils.project_root_dir, 'drivers', 'javascript')
     driver_build_env_name = 'JAVASCRIPT_DRIVER_DIR'
-    driver_build_path = os.getenv('JAVASCRIPT_DRIVER_DIR') or os.path.join(utils.project_root_dir(), 'build', 'packages', 'js')
+    driver_build_path = os.getenv('JAVASCRIPT_DRIVER_DIR') or os.path.join(utils.project_root_dir, 'build', 'packages', 'js')
     
-    polyglot_language_header = os.path.join(os.path.dirname(__file__), 'drivers', 'driver.js')
+    _polyglot_language_header_path = os.path.join(os.path.dirname(__file__), 'drivers', 'driver.js')
     
-    def comment(self):
-        return "//"
-
-    def langrepr(self, val):
-        if isinstance(val, str):
-            return repr(val)
-        elif isinstance(val, unicode):
-            return repr(val)[1:] # Get rid of the 'u'
-        elif isinstance(val, bool):
-            return ("true" if val else "false")
-        else:
-            return repr(str(val))
-
-    # Converts cannonical form (underscore separation) to camel case
-    def nametranslate(self, name):
-        if not re.search('__', name):
-            return re.sub('_[a-z]', lambda m: m.group()[1].upper(), name)
-        else:
-            return re.sub('__', '_', name)
+    lang_replaces = {
+        'None': 'null',
+        'nil': 'null',
+        'True': 'true',
+        'False': 'false'
+    }
+    line_comment = '//'
+    
+    nametranslate_regex = re.compile(r"(?P<quoteChar>[\"\'\`]?)\$?\b[a-z$]+(_[a-z$]+)+\b\$?(?P=quoteChar)")
+    
+    # Converts canonical form (underscore separation) to camel case
+    @classmethod
+    def nametranslate(cls, name):
+        def replaceFnct(match):
+            if match.group('quoteChar') not in (None, ''):
+                return match.group()
+            returnStr = ''
+            upCase = False
+            for char in match.group():
+                if upCase:
+                    upCase = False
+                    returnStr += char.upper()
+                else:
+                    if char == '_':
+                        upCase = True
+                    else:
+                        upCase = False
+                        returnStr += char
+            return returnStr
+        
+        name = re.sub(cls.nametranslate_regex, replaceFnct, name)
+        return re.sub('__', '_', name)
     
     def get_interpreter_version(self, executablePath):
         versionCheckProcess = subprocess.Popen([executablePath, '--version'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -270,11 +343,18 @@ class RbLang(SrcLang):
     minVersion = None
     maxVersion = None
     
-    driver_source_path = os.getenv('RUBY_DRIVER_SRC_DIR') or os.path.join(utils.project_root_dir(), 'drivers', 'ruby')
+    driver_source_path = os.getenv('RUBY_DRIVER_SRC_DIR') or os.path.join(utils.project_root_dir, 'drivers', 'ruby')
     driver_build_env_name = 'RUBY_DRIVER_DIR'
-    driver_build_path = os.getenv('RUBY_DRIVER_DIR') or os.path.join(utils.project_root_dir(), 'drivers', 'ruby', 'lib')
+    driver_build_path = os.getenv('RUBY_DRIVER_DIR') or os.path.join(utils.project_root_dir, 'drivers', 'ruby', 'lib')
     
-    polyglot_language_header = os.path.join(os.path.dirname(__file__), 'drivers', 'driver.rb')
+    lang_replaces = {
+        'None': 'nil',
+        'null': 'nil',
+        'True': 'true',
+        'False': 'false'
+    }
+    
+    _polyglot_language_header_path = os.path.join(os.path.dirname(__file__), 'drivers', 'driver.rb')
     
     def __init__(self, version, interpreter_env_name='RUBY'):
         if self.instance_setup is True:
@@ -303,27 +383,96 @@ class RbLang(SrcLang):
                 workingVersion = os.path.splitext(workingVersion)[0]
         self.test_types.append('rb')
         self.interpreter_name_exe_names.append('ruby')
-    
-    def rb_str_repr(self, string):
-        return ('"' + re.sub("\"", "\\\"", re.sub("\\\\", "\\\\\\\\", string)) + '"')
 
-    def langrepr(self, val):
-        if isinstance(val, str):
-            return self.rb_str_repr(val)
-        elif isinstance(val, unicode):
-            return re.sub("\\$", "\\$", repr(val)[1:]) # Get rid of the 'u'
-        elif isinstance(val, bool):
-            return ("true" if val else "false")
-        else:
-            return repr(str(val))
-
-    def dicttranslate(self, dic):
-        dicnew = re.sub("\\\\?'([^']*[^'\\\\])\\\\?':", ":\'\\1\'=>", dic)
-        dicnew = re.sub("\\\\n$", "\n", dicnew)
-        return dicnew
-
-    def nulltranslate(self, strng):
-        return re.sub('null', 'nil', strng)
+    @classmethod
+    def dict_translate(cls, source):
+        '''Given a string, find things that look like Python-esque dicts and translate them to ruby syntax'''
+        
+        levelChars = {
+            '}':'{',
+            ']':'[',
+            ')':'(',
+            '"':'"',
+            "'":"'"
+        }
+        
+        stateStack = []
+        escaped = False
+        source = list(unicode(source))
+        length = len(source)
+        for pos, char in enumerate(source):
+            
+            # in a quote
+            if len(stateStack) > 0 and stateStack[-1] in ('"', "'"):
+                if escaped == True:
+                    escaped = False
+                elif char == '\\':
+                    escaped = True
+                elif char == stateStack[-1]:
+                    stateStack.pop()
+            
+            # start of level
+            elif char in levelChars.values():
+                stateStack.append(char)
+            
+            # skip everything not in a level
+            elif len(stateStack) == 0:
+                continue
+            
+            # end of non-dict level
+            elif char in levelChars.keys() and stateStack[-1] == levelChars[char]:
+                stateStack.pop()
+            
+            # canidate points
+            elif char == ':' and stateStack[-1] == '{':
+                
+                # check that to the right and left look good
+                validPreChars = tuple(string.letters)
+                validPostChars = validPreChars + tuple(string.digits) + tuple(levelChars.values()) + ('+', '-')
+                try:
+                    # look at the preceding characters to see if this looks valid
+                    startedWord = False
+                    for i in xrange(1, pos):
+                        checkChar = source[pos - i]
+                        
+                        if checkChar in string.whitespace:
+                            if startedWord:
+                                break
+                            continue
+                        elif checkChar in string.digits: # {a0:4} is valid, {5:4} is not
+                            startedWord = True
+                            continue
+                        elif checkChar in ('"', "'"):
+                            break # this we need to translate
+                        elif checkChar in validPreChars:
+                            raise Exception() # these are auto-translated by Ruby 1.9+: {a:1} => {:a=>1}
+                        else:
+                            if startedWord:
+                                break
+                            raise Exception()
+                    else:
+                        raise Exception()
+                    
+                    # look at the following characters to make sure that looks good too
+                    for i in xrange(pos + 1, length):
+                        checkChar = source[i]
+                        if checkChar in string.whitespace:
+                            continue
+                        elif checkChar in validPostChars:
+                            break
+                        else:
+                            raise Exception()
+                    else:
+                        raise Exception()
+                    
+                    # passed both tests, replace it
+                    source[pos] = '=>'
+                    
+                except Exception: pass
+        
+        # - return the string
+        
+        return ''.join(source)
     
     def get_interpreter_version(self, executablePath):
         '''Return the version string for this interpreter'''
@@ -364,11 +513,10 @@ interpreters = {
 class TestGroup(object):
     
     testLanguageEntry = collections.namedtuple('testLanguageEntry', ['command', 'expected', 'definition', 'runopts', 'testopts'])
-    variableRegex = re.compile('^\s*(?P<quoteString>[\'\"]*)\s*(?P<variableName>[a-zA-Z][\w\[\]\{\}\'\"]*)\s*=\s*(?P<expression>[^=].+)$')
+    variableRegex = re.compile(r'^\s*(?P<quoteChar>[\'\"]?)\s*(?P<variableName>[a-zA-Z][\w\[\]\{\}\'\"]*)\s*=\s*(?P<expression>[^=].+)(?P=quoteChar)\s*$', flags=re.DOTALL | re.MULTILINE)
     
     @classmethod
-    def buildYamlTest(cls, testName, sourceFile, language, outputPath, shards=0,
-                      useSpecificTable = False):
+    def buildYamlTest(cls, testName, sourceFile, lang, outputPath, shards=1, useSpecificTable=False):
     
         # -- input validation
         
@@ -385,12 +533,12 @@ class TestGroup(object):
         if not os.path.isfile(sourceFile):
             raise ValueError('buildYamlTest requires a sourceFile, got: %s' % str(sourceFile))
         
-        # language
+        # lang
         
-        if language is None:
-            raise ValueError('buildYamlTest requires a language, got None')
-        if not isinstance(language, SrcLang):
-            raise ValueError('buildYamlTest requires a subclass of SrcLang, got %s' % language)
+        if lang is None:
+            raise ValueError('buildYamlTest requires a lang, got None')
+        if not isinstance(lang, SrcLang):
+            raise ValueError('buildYamlTest requires a subclass of SrcLang, got %s' % lang)
         
         # outputPath
         
@@ -408,56 +556,68 @@ class TestGroup(object):
         
         parsed_data = None
         try:
-            parsed_data = yaml.load(open(sourceFile))
+            parsed_data = yaml.safe_load(open(sourceFile))
         except Exception as e:
             raise ValueError('buildYamlTest got a sourceFile (%s) that was unable to be parsed as Yaml: %s' % (sourceFile, str(e)))
+        if parsed_data is None:
+            raise ValueError('buildYamlTest got a sourceFile (%s) that was unable to be parsed as Yaml' % sourceFile)
+        if not 'tests' in parsed_data or not isinstance(parsed_data['tests'], list):
+            raise ValueError('buildYamlTest got a sourceFile (%s) without any tests' % sourceFile)
         
         with open(outputPath, 'w') as outputFile:
             
             # - write the shebang line
             
-            outputFile.write('#!%s\n' % language.get_interpreter_path())
+            outputFile.write('#!%s\n' % lang.interpreter_path)
             
             # - write in the encoding (mostly for Python2.6)
             
-            outputFile.write('%s -*- coding: utf-8 -*-\n\n' % language.comment())
+            outputFile.write('%s -*- coding: utf-8 -*-\n\n' % lang.line_comment)
             
             # - mark start of the header/driver
             
-            outputFile.write('%s ========== Start of common test functions ==========\n\n' % language.comment())
+            outputFile.write('%s ========== Start of common test functions ==========\n\n' % lang.line_comment)
             
             # - insert a marker telling what test this is
             
-            outputFile.write('%s Tests %s (%s): %s (%s)\n\n' % (language.comment(), testName, language.display_name, parsed_data['desc'], sourceFile))
+            outputFile.write('\n%s Tests %s (%s): %s (%s)\n\n' % (lang.line_comment, testName, lang.display_name, parsed_data.get('desc', ''), sourceFile))
             
-            # - add the header/driver
+            # - write the header
             
-            with open(language.polyglot_language_header) as headerFile:
-                for chunk in iter((lambda: headerFile.read(1024)), ''):
-                    outputFile.write(chunk)
+            outputFile.write(lang.polyglot_language_header)
             
-            outputFile.write('\n\n')
+            # - generate the table setup lines
+            
+            outputFile.write('%s -- Table Creation\n\n' % lang.line_comment)
+            
+            if "table_variable_name" in parsed_data:
+                variableNames = parsed_data['table_variable_name']
+                if hasattr(parsed_data['table_variable_name'], 'upper'):
+                    variableNames = re.findall('([a-zA-Z\d\.\_\-]+)', parsed_data['table_variable_name'])
+                
+                for index, variableName in enumerate(variableNames):
+                    db_name, table_name = utils.get_test_db_table(tableName=testName, index=index)
+                    outputFile.write("setup_table(%s, %s, %s)\n" % (
+                        lang.translate_query(variableName, name=True),
+                        lang.translate_query(table_name),
+                        lang.translate_query(db_name)
+                    ))
+                outputFile.write('\n')
+            else:
+               outputFile.write('%s No auto-created tables\n\n' % lang.line_comment)
+            
+            # - test that all external tables are claimed
+            
+            outputFile.write('setup_table_check()\n\n')
             
             # - mark end of the header/driver
             
-            outputFile.write('%s ========== End of common test functions ==========\n\n' % language.comment())
-            
-            # - set up table if necessary
-            
-            if "table_variable_name" in parsed_data:
-                table_name = testName.replace(".","_").replace("/","_")
-                table_name += "_"
-                table_name += language.display_name.replace(" ","_").replace(".","_")
-                outputFile.write("setup_table(%s, %s)\n\n" % (
-                    language.langrepr(parsed_data["table_variable_name"]),
-                    language.langrepr(table_name)))
-            else:
-                outputFile.write("check_no_table_specified()\n\n")
+            outputFile.write('%s ========== End of common test functions ==========\n\n' % lang.line_comment)
             
             # - add the body of the tests
             
             for testNumber, test in enumerate(parsed_data['tests'], start=0):
-                cls.write_test(testName, outputFile, test, language, str(testNumber), shard=shards)
+                cls.write_test(testName, outputFile, test, lang, str(testNumber), shards=shards)
             
             outputFile.write('\n\n')
             
@@ -470,7 +630,7 @@ class TestGroup(object):
         os.chmod(outputPath, stat.S_IRWXU | stat.S_IRWXG | stat.S_IROTH | stat.S_IXOTH)
     
     @classmethod
-    def write_test(cls, testName, out, test, lang, index, shard=0):
+    def write_test(cls, testName, out, test, lang, index, shards=1):
         
         testName = os.path.join(testName, str(index))
 
@@ -478,11 +638,12 @@ class TestGroup(object):
         try:
             testCode = cls.get_lang_entries(test, lang)
         except Exception as e:
+            debug(traceback.format_exc())
             raise Exception("Error while processing test: %s\n%s" % (testName, str(e)))
         
         # Does this test define a variable?
         if testCode.definition:
-            cls.write_def(out, testCode.definition)
+            cls.write_def(testName, lang, out, testCode.definition)
         
         # Write the commands
         if testCode.command:
@@ -490,41 +651,55 @@ class TestGroup(object):
                 
                 variableMatch = cls.variableRegex.match(test_case)
                 if variableMatch:
-                    testCode.testopts['variable'] = variableMatch.group('variableName')
-                    test_case = variableMatch.group('quoteString') + variableMatch.group('expression')
+                    testCode.testopts['variable'] = lang.nametranslate(variableMatch.group('variableName'))
+                    test_case = variableMatch.group('expression')
                 
                 try:
-                    out.write("test(%(code)s, %(expected)s, '%(name)s', %(driveropts)s, %(testopts)s)\n" % {
-                        'code': test_case,
-                        'expected': testCode.expected or '""',
-                        'name': testName,
-                        'driveropts': lang.translate_query(repr(testCode.runopts), encode=False),
-                        'testopts': lang.translate_query(repr(testCode.testopts), encode=False)
+                    out.write("test(%(code)s, %(expected)s, %(name)s, %(driveropts)s, %(testopts)s)\n" % {
+                        'code': lang.translate_query(test_case, name=True),
+                        'expected': '""' if testCode.expected is None else lang.translate_query(testCode.expected),
+                        'name': repr(testName),
+                        'driveropts': lang.translate_query(testCode.runopts, quote=False),
+                        'testopts': lang.translate_query(testCode.testopts, quote=False)
                     })
                     
-                    # We want to auto-shard tables that we create. There is stil no
-                    # way to do this from rql so we have to hack the admin cli.
+                    # We want to auto-shard tables that we create. There is still no
+                    # way to do this from ReQL so we have to hack the admin cli.
                     
-                    if shard > 0:
+                    if shards > 1:
                         pattern = 'table_create\\(\'(\\w+)\'\\)'
                         mo = re.search(pattern, test_case)
                         if mo:
                             table_name = mo.group(1)
                             out.write('shard("%s")\n' % table_name)
                 except Exception as e:
+                    debug(traceback.format_exc())
                     raise Exception("Error while processing test: %s\n%s\n%s" % (testName, str(testCode.command), str(e)))
 
-    @staticmethod
-    def write_def(out, defs):
+    @classmethod
+    def write_def(cls, testName, lang, out, defs):
         for definition in defs:
-            out.write('define(%s)\n' % definition)
+            variableString = ''
+            
+            # parse the variable name
+            
+            variableMatch = cls.variableRegex.match(definition)
+            if not variableMatch:
+                raise Exception('Error while processing test %s: def entry missing variable name: %s' % (testName, str(definition)))
+            
+            variableString = lang.translate_query(variableMatch.group('variableName'), name=True)
+            definition = lang.translate_query(variableMatch.group('expression'), name=True)
+            
+            # write the output
+            
+            out.write('define(%s, %s)\n' % (definition, variableString))
     
     # Tests may specify generic test strings valid for all languages or language specific versions
     @classmethod
     def get_lang_entries(cls, source, lang, default='command'):
         assert default in ('command', 'expected', 'definition'), 'get_lang_entries requires that default be one of : command, expected, or definition'
         
-        results = { 'command': None, 'definition': None, 'expected': None, 'runopts': {}, 'testopts':{} }
+        results = { 'command':None, 'definition':None, 'expected':None, 'runopts':{}, 'testopts':{} }
         
         if source is None:
             pass
@@ -539,12 +714,12 @@ class TestGroup(object):
             if default != 'expected' and hasattr(source, '__iter__') and not hasattr(source, 'capitalize'):
                 results[default] = []
                 for item in source:
-                    results[default].append(string.Template(lang.translate_query(item)).safe_substitute({'langcode': langcode}))
+                    results[default].append(item)
             else:
                 if default == 'expected':
-                    results['expected'] = string.Template(lang.translate_expected(source)).safe_substitute({'langcode': langcode})
+                    results['expected'] = source
                 else:
-                    results[default] = [string.Template(lang.translate_query(source)).safe_substitute({'langcode': langcode})]
+                    results[default] = [source]
         else:
             if default == 'command':
                 
@@ -554,18 +729,17 @@ class TestGroup(object):
                 if 'testopts' in source:
                     results['testopts'].update(source['testopts'])
                 
-                # command
-                
-                for langCode in lang.test_types + ['cd']:
-                    if langCode in source:
-                        results = cls.combineLangEntries(results, cls.get_lang_entries(source[langCode], lang, 'command'))
-                        break
-                
                 # def and ot
                 if 'def' in source:
                     results = cls.combineLangEntries(results, cls.get_lang_entries(source['def'], lang, 'definition'))
                 if 'ot' in source:
                     results = cls.combineLangEntries(results, cls.get_lang_entries(source['ot'], lang, 'expected'))
+                
+                # command
+                for langCode in lang.test_types + ['cd']:
+                    if langCode in source:
+                        results = cls.combineLangEntries(results, cls.get_lang_entries(source[langCode], lang, 'command'))
+                        break
                     
             elif default == 'expected':
                 for langCode in lang.test_types + ['cd']:
@@ -602,27 +776,49 @@ class TestGroup(object):
         # combine them, keeping any non-None entries from right
         returnDict = {}
         for key in set(right.keys() + left.keys()): # should be the same, but...
-            if key in ('runopts', 'testopts') and any([left.get(key), right.get(key)]):
-                returnValue = left.get(key) or {}
-                returnValue.update(right.get(key) or {})
-                returnDict[key] = returnValue
-            else:
-                returnDict[key] = right.get(key) or left.get(key)
+            val = right.get(key)
+            if val in (None, [], {}):
+                val = left.get(key)
+            if key in ('runopts', 'testopts') and val is None:
+                val = {}
+            returnDict[key] = val
+        
         return returnDict
 
 class RethinkDBRunningServer(object):
+    
+    __driver_port = None
+    __cluster_port = None
+    
+    __reqlConnection = None
+    
     def __init__(self, driver_port, cluster_port):
-        self.driver_port_ = driver_port
-        self.cluster_port_ = cluster_port
-
+        self.__driver_port = driver_port
+        self.__cluster_port = cluster_port
+    
+    @property
+    def host(self):
+        return 'localhost'
+    
+    @property
     def driver_port(self):
-        return self.driver_port_
-
+        return self.__driver_port
+    
+    @property
     def cluster_port(self):
-        return self.cluster_port_
-
-    def executable(self):
+        return self.__cluster_port
+    
+    @property
+    def executable_path(self):
         return 'NOT_AVALIBLE_FOR_RUNNING_SERVERS'
+    
+    def check(self):
+        if not self.__reqlConnection:
+            self.__reqlConnection = r.connect(host=self.host, port=self.driver_port)
+        
+        # - a simple query to check availability
+        
+        r.db_list().run(self.__reqlConnection)
 
 # ==== Main
 
@@ -639,7 +835,7 @@ def check_language(option, opt_str, value, parser):
     foundAny = False
     for language in interpreters[value]:
         try:
-            language.get_interpreter_path()
+            language.interpreter_path # errors if it is not present/found
             foundAny = True
             if language not in selectedValues:
                 selectedValues.append(language)
@@ -652,9 +848,254 @@ def check_language(option, opt_str, value, parser):
     
     setattr(parser.values, option.dest, selectedValues)
 
-TestListing = collections.namedtuple('TestListing', ['name', 'path', 'language', 'type', 'interpreter'])
-def getTestList(rootPath, languages, testFilters=None):
-    '''Get a list of TestListing objects for tests found in the given folder'''
+class Test(object):
+    
+    # == constants
+    
+    TIMED_OUT_EXIT_CODE = -257 # outside the range of exit and signal codes
+    
+    # == class/instance variables
+    
+    timeout = 300 # seconds to timeout, this can be changed per-test
+    
+    # == instance variables
+    
+    name = None
+    type = None
+    path = None
+    driverLang = None
+    
+    __status = 'queued' # queued, setting up, running, ended
+    __result = None # None, failed setup, failed, crashed, crashed server, timed out, canceled, succeeded
+    testProcess = None
+    
+    setupStartTime = None
+    setupDuration = None
+    testDuration = None
+    
+    envVariables = None
+    
+    writeToStdout = False
+    __console_output = None
+    returncode = None
+    errorMessage = None # single-line description
+    errorDetails = None # multi-line details, e.g.: tracebacks
+    
+    def __init__(self, name, path, driverLang=None, timeout=None):
+        self.name = name
+        self.path = path
+        self.driverLang = driverLang
+        
+        if timeout is not None:
+            try:
+                self.timeout = float(timeout)
+            except Exception:
+                raise ValueError('timeout must be a numeric value, got: %s' % str(timeout))
+    
+    @property
+    def interpreter_path(self):
+        return None
+    
+    @property
+    def command(self):
+        if self.path is None:
+            raise RuntimeError('%s %s has no path defined when `command` was called' % (self.__class__.__name__, self.name))
+        
+        command = []
+        if self.interpreter_path is not None:
+            if not os.access(self.interpreter_path, os.X_OK):
+                raise RuntimeError('interpreter is not valid/runnable: %s' % str(self.interpreter_path))
+            command += [self.interpreter_path]
+        command += [str(self.path)]
+        return command
+    
+    @property
+    def status(self):
+        return self.__status
+    
+    @property
+    def result(self):
+        if self.__status != 'ended':
+            return None
+        else:
+            return self.__result
+        
+    @result.setter
+    def result(self, value):
+        '''Set the result to one of the following: failed, failed setup, crashed server, crashed, timed out, canceled, succeeded'''
+        
+        if value not in ('failed', 'failed setup', 'crashed server', 'crashed', 'timed out', 'canceled', 'succeeded'):
+            raise ValueError('result can not be "%s", rather it must be one of: failed, failed setup, crashed server, crashed, canceled, succeeded' % str(value))
+        
+        self.__result = value
+    
+    @property
+    def duration(self):
+        return (self.setupDuration or 0) + (self.testDuration or 0)
+    
+    @property
+    def console_output(self):
+        errorReturn = '' + (self.errorMessage or '') + (self.errorDetails or '')
+        
+        if self.__console_output is None:
+            return errorReturn
+        else:
+            self.__console_output.seek(0)
+            return (errorReturn + "\n" if errorReturn else '') + self.__console_output.read()
+    
+    def queueTest(self):
+        '''Called when the test is put (back) into the queue'''
+        
+        self.__status = 'queued'
+        self.setupStartTime = None
+        self.setupDuration = None
+        self.testDuration = None
+    
+    def setupTest(self):
+        '''Do any pre-run setup that needs to be done for this test'''
+        
+        if self.__status != 'queued':
+            raise RuntimeError('Something went wrong, we were going from "%s" to "setting up"' % self.__status)
+        
+        self.__status = 'setting up'
+        self.setupStartTime = time.time()
+        
+        # note: in subclasses where this could fail this should set the status to 'ended' and set the setupDuration correctly
+    
+    def startTest(self, server=None):
+        '''Run the test'''
+        
+        if self.__status != 'setting up':
+            raise RuntimeError('Something went wrong, we were going from "%s" to "running"' % self.__status)
+        
+        if server is None or not isinstance(server, (driver.Process, RethinkDBRunningServer)):
+            raise RuntimeError('startTest requires a server instance, got: %s' % str(server))
+        
+        self.__status = 'running'
+        self.setupDuration = time.time() - self.setupStartTime
+        
+        # -- collect ENV variables
+        
+        self.envVariables = os.environ.copy()
+        self.envVariables.update({
+            'RDB_DRIVER_PORT':str(server.driver_port),
+            'RDB_CLUSTER_PORT':str(server.cluster_port),
+            'RDB_SERVER_HOST':server.host
+        })
+        if self.driverLang:
+            self.envVariables.update({'INTERPRETER_PATH':self.driverLang.interpreter_path})
+        else:
+            del self.envVariables['INTERPRETER_PATH']
+        
+        # -- start the test process
+        
+        if self.writeToStdout is False:
+            self.__console_output = tempfile.NamedTemporaryFile()
+        
+        with testLock:
+            self.testProcess = subprocess.Popen(self.command, stdout=self.__console_output, stderr=self.__console_output, preexec_fn=os.setpgrp, env=self.envVariables)
+    
+    def checkTestDone(self):
+        '''Check on a running test, reply with True if running, False if ended'''
+        
+        if self.__status != 'running':
+            raise RuntimeError('checkTest called on a test that was %s' % self.__status)
+        
+        # --
+        
+        if self.testProcess.poll() is None:
+            return False
+        
+        elif self.testProcess.returncode == 0:
+            self.result = 'succeeded'
+            self.returncode = self.testProcess.returncode
+        
+        elif self.testProcess.returncode < 0:
+            self.result = 'crashed'
+            self.returncode = self.testProcess.returncode
+        
+        else:
+            self.result = 'failed'
+            self.returncode = self.testProcess.returncode
+        
+        # -- kill everything in the process group, just in case
+        
+        utils.kill_process_group(self.testProcess.pid)
+        
+        # -- set the end markers
+        
+        self.testDuration = time.time() - self.setupStartTime - self.setupDuration
+        self.__status = 'ended'
+        
+        # -- return True to signal it has ended
+        
+        return True
+    
+    def endTest(self, result=None, errorMessage=None, errorDetails=None):
+        '''Interrupts a running test'''
+        
+        if not self.__status in ('running', 'setting up'):
+            raise RuntimeError('endTest called on a test that was %s' % self.__status)
+        
+        self.errorMessage = errorMessage
+        self.errorDetails = errorDetails
+        
+        # -- kill everything in the process group
+        
+        if self.testProcess is not None and self.testProcess.pid is not None:
+            utils.kill_process_group(self.testProcess.pid)
+        
+        # -- set the end markers
+        
+        if self.__status == 'setting up':
+            self.setupDuration = time.time() - self.setupStartTime
+            self.result = result or 'failed setup'
+        elif self.__status == 'running':
+            self.testDuration = time.time() - self.setupStartTime - self.setupDuration
+            self.result = result or 'failed'
+        
+        if result == 'timed out':
+            self.returncode = self.TIMED_OUT_EXIT_CODE
+        
+        self.__status = 'ended'
+        self.returncode = None
+        
+
+class YamlTest(Test):
+    buildFolder = os.path.join(os.path.realpath(os.path.dirname(__file__)), 'build')
+    srcPath = None
+    shards = None
+    
+    def __init__(self, name, path, driverLang=None, timeout=None, shards=1):
+        self.srcPath = path
+        self.shards = shards
+        super(YamlTest, self).__init__(name, None, driverLang=driverLang, timeout=timeout)
+    
+    @property
+    def interpreter_path(self):
+        return self.driverLang.interpreter_path
+    
+    def setupTest(self):
+        '''Build test executable'''
+        
+        super(YamlTest, self).setupTest()
+        
+        # -- ensure build folder exists
+        
+        try:
+            os.makedirs(self.buildFolder)
+        except OSError as e:
+            if e.errno != 17:
+                raise
+        
+        # -- build test file
+        
+        self.path = os.path.join(self.buildFolder, self.name.replace('/', '.'))
+        
+        TestGroup.buildYamlTest(testName=self.name, sourceFile=self.srcPath, lang=self.driverLang, outputPath=self.path, shards=self.shards)
+        
+def getTestList(rootPath, languages, testFilters=None, shards=0):
+    '''Get a list of Test objects for tests found in the given folder'''
     
     # -- input validation
     
@@ -673,7 +1114,7 @@ def getTestList(rootPath, languages, testFilters=None):
             testFilters = [testFilters]
         for testFilter in testFilters:
             if not hasattr(testFilter, 'match'):
-                raise ValueError('getTestList got a non-regex value as a fiter: %s' % str(testFilter))
+                raise ValueError('getTestList got a non-regex value as a filter: %s' % str(testFilter))
     
     # languages
     
@@ -718,11 +1159,11 @@ def getTestList(rootPath, languages, testFilters=None):
                 
                 if extension == 'yaml':
                     pass # implicitly all languages
-                elif not any([x in language.test_types for x in testLanguages]):
+                elif not any((x in language.test_types for x in testLanguages)):
                     continue
                 
                 subTestName = '%s.%s' % (testName, language.test_types[0])
-            
+                
                 # - run the filters
 
                 if testFilters is not None and len(testFilters) > 0:
@@ -736,38 +1177,300 @@ def getTestList(rootPath, languages, testFilters=None):
                 
                 # - add the test
                 
-                interpreter = None
                 if extension == 'yaml':
-                    interpreter = language.get_interpreter_path()
-                
-                foundTests.append(TestListing(name=subTestName, path=os.path.join(root, fileName), language=language, type=extension, interpreter=interpreter))
+                    foundTests.append(YamlTest(name=subTestName, path=os.path.join(root, fileName), driverLang=language, shards=shards))
+                else:
+                    foundTests.append(Test(name=subTestName, path=os.path.join(root, fileName), driverLang=language))
     
     # --
     
     foundTests.sort(key=lambda x: (x.name, x.type))
     return foundTests
 
-runningProcessGroupsIds = []
-def cleanup(*args):
-    '''fired by atexit or a signal handler, this should make sure we don't leave processes running'''
+class WorkerThread(threading.Thread):
+    '''Serially runs Test objects from its workQueue, managing a server instance and optionally returning (status-test, test) tuples'''
     
-    for processGroupId in runningProcessGroupsIds:
+    daemon = True
+    workQueue = None
+    outputQueue = None
+    
+    existingServer = None
+    existingDBsToTables = None # dict of arrays of db_name => table_name already on this server
+    
+    server = None
+    serverLogFile = None
+    reqlConnection = None
+    
+    writeToStdout = False
+    
+    def __init__(self, workQueue, outputQueue, existingServer=None, writeToStdout=False):
+        if workQueue is None or not isinstance(workQueue, Queue.Queue):
+            raise ValueError('workQueue must be a Queue object')
+        self.workQueue = workQueue
+        
+        if outputQueue is not None and not isinstance(outputQueue, Queue.Queue):
+            raise ValueError('outputQueueu must be a Queue object')
+        self.outputQueue = outputQueue
+        
+        if existingServer is not None:
+            if isinstance(existingServer, RethinkDBRunningServer):
+                self.existingServer = existingServer
+                self.server = existingServer
+                
+                self.reqlConnection = r.connect(host=self.server.host, port=self.server.driver_port)
+                self.existingDBsToTables = {}
+                for dbName in r.db_list().run(self.reqlConnection):
+                    self.existingDBsToTables[dbName]  = r.db(dbName).table_list().run(self.reqlConnection)
+            else:
+                raise Exception('existingServer must be an instance of RethinkDBRunningServer, got: %s' % repr(existingServer))
+        
+        self.writeToStdout = writeToStdout == True
+        
+        super(WorkerThread, self).__init__()
+        self.start()
+    
+    def run_server(self):
+        '''Ensure that we have a running server'''
+        
+        # -- check for an already running server
+        
+        self.check_server()
+        
+        # -- start a new server
+        
+        if self.server is None:
+            self.server = driver.Process(console_output=True, wait_until_ready=True)
+        
+        # -- check that it is running
+        
+        if not self.check_server():
+            raise Exception ('Server could not be started!') # ToDo: figure out how to report this properly
+    
+    def check_server(self):
+        '''Check that the server is up, an responds to a basic query'''
+        
+        if self.server is None:
+            self.reqlConnection = None # just in case
+            return False
+        
         try:
-            os.killpg(processGroupId, signal.SIGKILL) # TODO: police this
-        except Exception:
-            pass
-    if len(args) == 2 and args[0] == signal.SIGINT:
-        sys.exit(130) # standard signal.SIGINT exit code
-atexit.register(cleanup)
-signal.signal(signal.SIGINT, cleanup) # TODO: cover all relevent signals
+            if self.existingServer is None:
+                self.server.check()
+            
+            # a basic test
+            if self.reqlConnection is None:
+                self.reqlConnection = r.connect(host=self.server.host, port=self.server.driver_port)
+            r.db_list().run(self.reqlConnection)
+        
+        except (RuntimeError, r.RqlDriverError):
+            if self.existingServer:
+                raise Exception('External server stopped responding while testing') # ToDo: make this a better error
+            else:
+                warnings.warn('Server was not running or available, starting a new one') # ToDo: figure out how to link this back to the last test
+                try:
+                    self.server.close()
+                except Exception: pass
+                self.server = None
+                self.reqlConnection = None
+                return False
+        return True
+    
+    def clean_server(self):
+        '''Clean out the server so it only has the rethinkdb and an empty test databases'''
+        
+        if self.reqlConnection is None:
+            raise ValueError('clean_server called when there was no connection')
+        
+        try:
+            
+            # -- ensure that the test db is present
+            
+            r.expr(['test']).set_difference(r.db_list()).for_each(r.db_create(r.row)).run(self.reqlConnection)
+            
+            # -- clean out databases/tables
+            
+            if self.existingServer is None:
+                
+                # - drop all databases except test and rethinkdb
+                
+                r.db_list().set_difference(['test', 'rethinkdb']).for_each(r.db_drop(r.row)).run(self.reqlConnection)
+                
+                # - drop all tables in test
+                
+                r.db('test').table_list().for_each(r.db('test').table_drop(r.row)).run(self.reqlConnection)
+                
+            else:
+                
+                # - remove all dbs that were not there initially
+                
+                r.db_list().set_difference(self.existingDBsToTables.keys()).for_each(r.db_drop(r.row)).run(self.reqlConnection)
+                
+                # - groom out the tables that were not there initially
+                
+                for db_name in r.db_list().run(self.reqlConnection):
+                    if db_name == 'rethinkdb':
+                        continue
+                    r.db(db_name).table_list().set_difference(self.existingDBsToTables[db_name]).for_each(r.db(db_name).table_drop(r.row)).run(self.reqlConnection)
+            
+            # -- clean rethinkdb._debug_scratch
+            
+            r.db('rethinkdb').table('_debug_scratch').delete().run(self.reqlConnection)
+            
+            # -- remove any other connected servers
+            
+            if self.existingServer is None:
+                r.db('rethinkdb').table('server_config').filter(r.row['id'] != self.server.uuid).delete().run(self.reqlConnection)
+                r.wait().run(self.reqlConnection)
+            
+        except Exception as e:
+            if self.existingServer:
+                warnings.warn('Unable to clean existing server! Error message: %s' % str(e)) # ToDo: improve logging
+            else:
+                warnings.warn('Unable to clean server, starting a new one. Error message: %s' % str(e)) # ToDo: improve logging
+                try:
+                    self.server.close()
+                except Exception: pass
+                self.server = None
+                self.reqlConnection = None
+    
+    def run(self):
+        try:
+            while cancelRun is False:
+                
+                # -- get a test
+                
+                test = None
+                try:
+                    test = self.workQueue.get_nowait()
+                except Queue.Empty:
+                    break
+                
+                # -- ensure we have an available server
+                
+                if self.existingServer:
+                    self.check_server()
+                else:
+                    self.run_server()
+                
+                # -- make sure it is clean and setup
+                
+                self.clean_server()
+                
+                # -- set writeToStdout
+                
+                test.writeToStdout = self.writeToStdout
+                
+                # -- pre-process the test
+                
+                if self.outputQueue:
+                    self.outputQueue.put(('setting up', test))
+                
+                try:
+                    test.setupTest()
+                except Exception as e:
+                    debug(traceback.format_exc())
+                    test.endTest(errorMessage='Failed setting up test %s' % str(test.name), errorDetails=traceback.format_exc())
+                    self.outputQueue.put((test.status, test))
+                    continue
+                
+                # -- run the test
+                
+                try:
+                    self.outputQueue.put(('running', test))
+                    test.startTest(server=self.server)
+                except Exception as e:
+                    debug(traceback.format_exc())
+                    test.endTest(errorMessage='Failed starting test', errorDetails=traceback.format_exc())
+                    self.outputQueue.put((test.status, test))
+                    continue
+                
+                # - monitor the test running
+                
+                restartServer = False
+                
+                if test.status == 'running':
+                    deadline = time.time() + test.timeout
+                    
+                    while time.time() < deadline:
+                        if cancelRun is True:
+                            test.endTest(result='canceled')
+                            break
+                        try:
+                            if test.checkTestDone():
+                                if test.returncode != 0 and self.existingServer is None:
+                                    restartServer = True
+                                break
+                            try:
+                                self.server.check()
+                            except Exception as e:
+                                test.endTest(result='crashed server', errorMessage='Server crashed during testing')
+                                restartServer = True
+                                # ToDo: copy the server logs into the folder
+                                break
+                            time.sleep(.1)
+                        except Exception as e:
+                            debug(traceback.format_exc())
+                            test.endTest(errorMessage='Exception while monitoring', errorDetails=traceback.format_exc())
+                            self.outputQueue.put((test.status, test))
+                            break
+                    else:
+                        # ToDo: sample running processes
+                        test.endTest(result='timed out', errorMessage='Timed out after %d seconds' % test.timeout)
+                
+                # - check the server
+                
+                if test.result != 'crashed server':
+                    try:
+                        self.server.check()
+                    except Exception as e:
+                        if test.result == 'succeeded':
+                            test.result = 'crashed server'
+                        
+                        if test.errorMessage is None:
+                            test.errorMessage = 'Server crashed while running'
+                        else:
+                            test.errorMessage += ', and the crashed server while running'
+                        
+                        if test.errorDetails is None:
+                            test.errorDetails = traceback.format_exc()
+                        
+                        # ToDo: copy the server logs into the folder
+                
+                if restartServer:
+                    try:
+                        self.server.close()
+                    except Exception: pass
+                    self.server = None
+                
+                # -- return result
+                
+                self.outputQueue.put((test.status, test))
+                self.workQueue.task_done() # not really important
+            
+            # - shut down the server
+            
+            if self.server is not None:
+                try:
+                    self.server.close()
+                except Exception: pass # ToDo: mark the last test bad if this fell over
+                self.server = None
+        
+        except Exception as e:
+            debug(traceback.format_exc())
+            raise Warning("Worker failure: " + unicode(e))
+        
+        finally:
+            if self.existingServer:
+                self.clean_server()
 
 def main():
+    global print_debug
     
     testFilters = []
     testList = []
-    build_directory = None
+    rethinkdb_exe_path = None
     
-    servers = None
+    existingServer = None
     
     # -- parse command line options
     
@@ -775,7 +1478,7 @@ def main():
     
     parser.add_option('-l', '--list', dest='list_mode', default=False, action='store_true', help='list the tests and exit')
     
-    parser.add_option('-b', '--build-dir', dest='build_directory', default=None, help='path to a specific build, usually starting with release_ or debug_')
+    parser.add_option('-b', '--server-binary', dest='rethinkdb_exe_path', default=None, help='path to RethinkDB server binary to test')
     parser.add_option(      '--clean', dest='clean_run_directory', default=False, action='store_true', help='clean the run directory before running')
     
     parser.add_option('-i', '--interpreter', dest='languages', action='callback', callback=check_language, choices=list(interpreters.keys()), type='choice', default=None, help='the language to test')
@@ -783,9 +1486,11 @@ def main():
     
     parser.add_option('-c', '--cluster-port', dest='cluster_port', default=None, type='int', help='cluster port of an already-running rethinkdb instance')
     parser.add_option('-d', '--driver-port', dest='driver_port', default=None, type='int', help='driver port of an already-running rethinkdb instance')
-    parser.add_option('-t', '--table', dest='table', default="no_table_specified", type='string', help='name of pre-existing table to run queries against.')
+    parser.add_option('-t', '--table', dest='table', default=None, type='string', help='name of pre-existing table to run queries against')
     
-    parser.add_option('-v', '--verbose', dest='verbose', default=False, action='store_true', help='show in-progress messages from tests')
+    parser.add_option('-v', '--verbose', dest='verbose', default=False, action='store_true', help='show test output while running (disables -j/--jobs')
+    
+    parser.add_option('-j', '--jobs', dest='workerThreads', default=None, type='int', help='tests to run simultaneously (default 2)')
     
     options, args = parser.parse_args()
     
@@ -793,21 +1498,34 @@ def main():
     
     # cluster_port/driver_port
     
-    if (options.cluster_port is not None or options.driver_port is not None) and None in (options.cluster_port, options.driver_port):
-        parser.error('If either of the following options are used, both must be specifed: -c/--cluster-port, -d/--driver-port')
+    if any([options.cluster_port, options.driver_port]) and not all([options.cluster_port, options.driver_port]):
+        parser.error('If either of the following options are used, both must be specified: -c/--cluster-port, -d/--driver-port')
     if options.driver_port is not None:
-        servers = RethinkDBRunningServer(options.driver_port, options.cluster_port)
+        existingServer = RethinkDBRunningServer(options.driver_port, options.cluster_port)
         # TODO: validate that this is actually a running server
         
         if options.shards != 1:
             parser.error('The -c/--cluster-port and -d/--driver-port options can not be used with -s/--shards')
-    else:
-        if options.table != "no_table_specified":
-            parser.error('If you specify -t/--table, you must also specify -c/--cluster-port and -d/--driver-port')
+    elif options.table:
+        parser.error('If you specify -t/--table, you must also specify -c/--cluster-port and -d/--driver-port')
     
-    if options.table != "no_table_specified":
-        if options.table.count(".") != 1:
-            parser.error('Parameter to -t/--table should be of the form db.table')
+    if options.table and options.table.count(".") != 1:
+        parser.error('Parameter to -t/--table should be of the form db.table')
+    
+    # workerThreads
+    
+    if options.workerThreads is None:
+        if options.table or options.verbose is True:
+            options.workerThreads = 1
+        else:
+            options.workerThreads = 2
+    
+    elif options.verbose is True:
+        warnings.warn('-v/--verbose disables running more than one test in parallel')
+        options.workerThreads = 1
+    
+    elif options.workerThreads < 1:
+        parser.error('-j/--jobs value must be 1 or greater')
     
     # - add filters
     
@@ -838,16 +1556,16 @@ def main():
         for languageGroup in (interpreters['js'], interpreters['py'], interpreters['rb']):
             for language in languageGroup:
                 try:
-                    language.get_interpreter_path()
+                    language.interpreter_path # raises exception if not present/found
                     options.languages.append(language)
                     break
                 except Exception: pass
         if len(options.languages) == 0:
-            parser.error('Unable to find interperters for any of the default languages')
+            parser.error('Unable to find interpreters for any of the default languages')
     
     # -- get the list of tests
     
-    testList = getTestList(os.path.realpath(os.path.dirname(__file__)), languages=options.languages, testFilters=testFilters)
+    testList = getTestList(os.path.realpath(os.path.dirname(__file__)), languages=options.languages, testFilters=testFilters, shards=options.shards)
     
     # -- clean run dir if requested
     
@@ -859,7 +1577,7 @@ def main():
             else:
                 os.unlink(runDirPath)
     
-    # -- short-circut if there are no tests
+    # -- short-circuit if there are no tests
     
     if len(testList) == 0:
         languagesString = 'for the language: '
@@ -881,54 +1599,40 @@ def main():
             print(test.name)
         sys.exit()
     
-    # -- reduce the langauges to only ones we have tests selected for
+    # -- reduce the languages to only ones we have tests selected for
     
     for language in options.languages[:]:
-        foundLangauge = False
         for test in testList:
-            if test.language == language:
-                foundLangauge = True
+            if test.driverLang == language:
                 break
-        if not foundLangauge:
+        else:
             options.languages.remove(language)
             sys.stderr.write('Warning: did not find any tests for %s\n' % language.display_name)
     
-    # -- check the build_directory
+    # -- check the rethinkdb_exe_path
     
-    if options.build_directory is None:
+    if options.rethinkdb_exe_path is None:
         try:
-            build_directory = utils.latest_build_dir()
+            rethinkdb_exe_path = utils.find_rethinkdb_executable()
         except test_exceptions.TestingFrameworkException as e:
             sys.exit(str(e))
     else:
-        build_directory = options.build_directory
+        rethinkdb_exe_path = options.rethinkdb_exe_path
     
-    if not os.path.isfile(os.path.join(build_directory, 'rethinkdb')):
-        sys.exit('Error: the slected build directory does not look valid: %s' % build_directory)
+    if not os.access(rethinkdb_exe_path, os.X_OK):
+        sys.exit('Error: selected RethinkDB server binary does not look valid: %s' % rethinkdb_exe_path)
     
     # -- set ENV settings for child processes
     
-    if 'RUBYLIB' in os.environ:
-        os.environ['RUBYLIB'] = ':'.join([os.path.join(utils.project_root_dir(), 'build', 'drivers', 'ruby'), os.environ['RUBYLIB']])
-    else:
-        os.environ['RUBYLIB'] = os.path.join(utils.project_root_dir(), 'build', 'drivers', 'ruby')
+    os.environ['RDB_EXE_PATH'] = rethinkdb_exe_path
     
-    if 'PYTHONPATH' in os.environ:
-        os.environ['PYTHONPATH'] = ':'.join([os.path.join(utils.project_root_dir(), 'drivers', 'python'), os.environ['PYTHONPATH']])
-    else:
-        os.environ['PYTHONPATH'] = os.path.join(utils.project_root_dir(), 'drivers', 'python')
-    
-    if 'NODE_PATH' in os.environ:
-        os.environ['NODE_PATH'] = ':'.join([os.path.join(utils.project_root_dir(), 'build', 'drivers', 'javascript'), os.environ['NODE_PATH']])
-    else:
-        os.environ['NODE_PATH'] = os.path.join(utils.project_root_dir(), 'build', 'drivers', 'javascript')
-    
-    os.environ['BUILD_DIR'] = build_directory
+    if options.table:
+        os.environ['TEST_DB_AND_TABLE_NAME'] = options.table
     
     # -- make sure the drivers are built
     
     for language in options.languages:
-        outputFile = tempfile.NamedTemporaryFile()
+        outputFile = tempfile.NamedTemporaryFile(mode='w+')
         notificationDeadline = time.time() + 3
         makeProcess = subprocess.Popen(['make', '-C', language.driver_source_path], stdout=outputFile, stderr=subprocess.STDOUT)
         while makeProcess.poll() is None and time.time() < notificationDeadline:
@@ -943,128 +1647,143 @@ def main():
         
         os.environ[language.driver_build_env_name] = language.driver_build_path
     
-    # -- run the testing
+    # -- print pre-testing info
     
-    if len(testList) == 0:
-        sys.exit()
-    
-    print('Using rethinkdb binary from %s' % build_directory)
+    print('Using rethinkdb binary %s' % rethinkdb_exe_path)
     for thisLanguage in options.languages:
-        print('\t%s interpreter: %s, driver: %s' % (thisLanguage.display_name, thisLanguage.get_interpreter_path(), thisLanguage.driver_source_path))
+        print('\t%s interpreter: %s, driver: %s' % (thisLanguage.display_name, thisLanguage.interpreter_path, thisLanguage.driver_source_path))
+    
     startTime = time.time()
+    
+    # -- add tests to queues
+    
+    testQueue = Queue.Queue()
+    outputQueue = Queue.Queue()
+    
+    for test in testList:
+        testQueue.put(test)
+    
+    # -- start the worker threads
+    
+    workerThreads = [WorkerThread(workQueue=testQueue, outputQueue=outputQueue, existingServer=existingServer, writeToStdout=options.verbose) for x in range(options.workerThreads)]
+    
+    # -- monitor progress
     
     failedTests = []
     
-    srcPath = os.path.join(os.path.realpath(os.path.dirname(__file__)), 'src')
-    buildPath = os.path.join(os.path.realpath(os.path.dirname(__file__)), 'build')
+    preparingTests = 0
+    runningTests = 0
+    waitingTests = len(testList)
+    canceledTests = 0
+    passedTests = 0
     
-    for test in testList:
+    while True:
         
-        executablePath = test.path
-        additionalArguments = []
+        # - print all status messages
         
-        # - make type-specific setups
-        
-        if test.type == 'yaml':
+        while True:
             
-            # - build the runable test
-            
-            if not os.path.isdir(srcPath):
-                os.makedirs(srcPath)
-            executablePath = os.path.join(buildPath, test.name.replace('/', '.'))
-            
+            message = None
+            test = None
             try:
-                TestGroup.buildYamlTest(test.name, test.path, test.language, executablePath, shards=options.shards-1)
-            except Exception as e:
-                failedTests.append("%s (%s)" % (test.name, test.language.display_name))
-                sys.stderr.write("Setup Failure: unable to create test executable for Yaml test %s:\n" % test.name)
-                traceback.print_exc()
-                continue
+                message, test = outputQueue.get_nowait()
+            except Queue.Empty:
+                break
             
-            # - start the server
+            timeString = 'T+ %.1f sec' % (time.time() - startTime)
             
-            if servers is None:
-                if options.cluster_port is not None:
-                    sys.exit('Internal failure: we somehow lost track of the already running server!')
-                servers = test_util.RethinkDBTestServers(num_servers=1, server_build_dir=build_directory)
-                servers.start() # TODO: handle server failures
-            
-            # --
-            
-            additionalArguments = ['UNUSED', str(servers.driver_port()), options.table, str(servers.cluster_port()), servers.executable()]
-        
-        if test.type == 'test':
-            additionalArguments = [utils.latest_build_dir()]
-        
-        # - run the test
-        
-        outputChannel = None
-        if options.verbose is False:
-            outputChannel = tempfile.NamedTemporaryFile()
-        
-        testProcessGroupId = None
-        print("\n== Running %s (%s)" % (test.name, test.language.display_name))
-        try:
-            
-            if not os.path.isfile(executablePath):
-                failedTests.append("%s (%s)" % (test.name, test.language.display_name))
-                sys.stderr.write("== Failed %s test as it could not be located %s\n" % (test.name, executablePath))
-                continue
-            
-            testExecutable = [executablePath]
-            if test.interpreter is not None:
-                testExecutable = [test.interpreter] + testExecutable
-            testProcess = subprocess.Popen(testExecutable + additionalArguments, stdout=outputChannel, stderr=outputChannel, preexec_fn=os.setpgrp, env=dict(os.environ.items() +  {'INTERPRETER_PATH':test.language.interpreter_path}.items()))
-            
-            # - kill off the process group
-            
-            try:
-                testProcessGroupId = os.getpgid(testProcess.pid)
-                runningProcessGroupsIds.append(testProcessGroupId)
-            except OSError:
+            if message == 'queued':
                 pass
-            
-            if testProcess.wait() != 0:
-                if servers is not None:
-                    try:
-                        servers.stop()
-                    except Exception as e:
-                        sys.stderr.write('RethinkDB server failed: %s' % str(e))
-                    servers = None
+            elif message == 'setting up':
+                sys.stdout.write('== Starting: %s (%s)\n' % (test.name, timeString))
+                preparingTests -= 1
+                preparingTests += 1
+            elif message == 'running':
+                #sys.stdout.write('== Running: %s (%s)\n' % (test.name, timeString))
+                waitingTests -= 1
+                runningTests += 1
+            elif message == 'ended':
+                runningTests -= 1
                 
-                failedTests.append("%s (%s)" % (test.name, test.language.display_name))
-                sys.stderr.write("== Failed %s test with result code %s (%s)" % (test.name, str(testProcess.returncode), test.path))
-                if outputChannel is not None and os.path.getsize(outputChannel.name) > 0:
-                    outputChannel.seek(0)
-                    sys.stderr.write(' Output:\n')
-                    sys.stderr.write(outputChannel.read())
-                sys.stderr.write('\n')
-            else:
-                print("== Successfully passed %s test" % test.name)
-        finally:
-            outputChannel = None
-            if testProcessGroupId is not None:
-                try:
-                    os.killpg(testProcessGroupId, signal.SIGINT) # TODO: police this
-                except Exception:
-                    pass
-            if testProcessGroupId in runningProcessGroupsIds:
-                runningProcessGroupsIds.remove(testProcessGroupId)
-            testProcessGroupId = None
+                durationString = '%.1f sec' % (test.duration)
+                                
+                if test.result is None:
+                    raise Warning('Got None for test.result, this should not happen')
+                    continue
+                
+                if test.result == 'succeeded':
+                    sys.stdout.write('== Passed: %s in %s (%s)\n' % (test.name, durationString, timeString))
+                    passedTests += 1
+                
+                elif test.result == 'canceled':
+                    sys.stdout.write('== Canceled: %s after %s (%s)\n' % (test.name, durationString, timeString))
+                    canceledTests += 1
+                
+                else:
+                    failedTests.append(test)
+                    
+                    extraMessage = ''
+                    if test.result == 'failed':
+                        extraMessage = ' with exit code %s' % test.returncode
+                    elif test.result == 'crashed':
+                        extraMessage = ' with signal %s' % abs(test.returncode)
+                    elif test.result == 'timed out':
+                        extraMessage = ' after %d seconds' % test.duration
+                    
+                    if options.verbose is True:
+                        sys.stderr.write('>>> %s %s%s after %s (%s) <<<\n' % (test.result.capitalize(), test.name, extraMessage, durationString, timeString))
+                    else:
+                        sys.stderr.write('>>> %s %s%s after %s (%s)\n\n' % (test.result.capitalize(), test.name, extraMessage, durationString, timeString))
+                        sys.stderr.write(test.console_output)
+                        sys.stderr.write('\n<<< end %s: %s\n' % (test.result.capitalize(), test.name))
             sys.stderr.flush()
             sys.stdout.flush()
+        
+        # - end if there are no worker threads
+        
+        if len(workerThreads) == 0:
+            break
+        
+        # - reap dead worker threads
+        
+        for worker in copy.copy(workerThreads):
+            if not worker.isAlive():
+                worker.join(.01) # should never timeout, but just in case
+                workerThreads.remove(worker)
+        
+        # -
+        
+        time.sleep(.1)
     
-    if len(failedTests) == 0:
+    # -- check that all tests have a finished status
+    
+    if cancelRun is False:
+        for test in testList:
+            if test.status != 'ended':
+                raise Warning('Test was in state "%s" after run: %s' % (test.status, test.name))
+    
+    # -- report final results
+    
+    failedTestNames = [test.name for test in failedTests]
+    
+    if cancelRun is True:
+        print('\n== Canceled after %.2f seconds with %d test%s running. %s test%s passed, %s test%s failed, and %s test%s remaining%s' % (
+            time.time() - startTime,
+            canceledTests, 's' if canceledTests != 1 else '',
+            passedTests, 's' if passedTests != 1 else '',
+            len(failedTestNames), 's' if len(failedTestNames) != 1 else '',
+            waitingTests, 's' if waitingTests != 1 else '',
+            ('\n\t%s\n' % ('\n\t'.join(failedTestNames) if len(failedTestNames) > 0 else ''))
+        ))  
+    elif len(failedTests) == 0:
         testNumberMessage = 'the 1 test'
         if len(testList) > 1:
             testNumberMessage = 'all %s tests' % len(testList)
-        print('\n== Sucessfully passed %s in %.2f seconds!' % (testNumberMessage, time.time() - startTime))
+        print('\n== Successfully passed %s in %.2f seconds!' % (testNumberMessage, time.time() - startTime))
         sys.exit()
     else:
-        plural = ''
-        if len(failedTests) > 1:
-            plural = 's'
-        sys.exit('\n== Failed %d test%s (of %d) in %.2f seconds!\n\t%s\n\n' % (len(failedTests), plural, len(testList), time.time() - startTime, '\n\t'.join(failedTests)))
+        plural = 's' if len(failedTests) > 1 else ''
+        sys.exit('\n== Failed %d test%s (of %d) in %.2f seconds!\n\t%s\n\n' % (len(failedTests), plural, len(testList), time.time() - startTime, '\n\t'.join(failedTestNames)))
         
 if __name__ == '__main__':
     main()

@@ -17,8 +17,15 @@ Get help
 
 Check out www.rethinkdb.com/community
 
-Code contributors
+Contributing
 -----------------
 
-Check out [src/README](src/README.md)
+Check out our [contributing guidelines](CONTRIBUTING.md).
 
+### Official Drivers
+
+The drivers are located in this repository, for more information see one of the following:
+
+- [JavaScript](drivers/javascript/)
+- [Python](drivers/python/)
+- [Ruby](drivers/ruby/)

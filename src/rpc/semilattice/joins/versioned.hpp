@@ -11,7 +11,7 @@
 
 /* A `versioned_t` is used in the semilattices to track a setting that the user is
 allowed to update. If the setting is updated in two places simultaneously, the
-semilattice join will pick the one that came later as measured by the machines' clocks.
+semilattice join will pick the one that came later as measured by the servers' clocks.
 */
 
 template<class T>
@@ -46,6 +46,16 @@ public:
         of depending on the order in which they are joined. */
         tiebreaker(generate_uuid()) { }
 
+    /* This constructor is only used when migrating from pre-v1.16 metadata files that
+    used vector clocks */
+    static versioned_t make_with_manual_timestamp(time_t time, const T &value) {
+        versioned_t v;
+        v.timestamp = time;
+        v.tiebreaker = generate_uuid();
+        v.value = value;
+        return v;
+    }
+
     const T &get_ref() const {
         return value;
     }
@@ -62,7 +72,7 @@ public:
         on_change();
     }
 
-    RDB_MAKE_ME_SERIALIZABLE_3(value, timestamp, tiebreaker);
+    RDB_MAKE_ME_SERIALIZABLE_3(versioned_t, value, timestamp, tiebreaker);
 
 private:
     template<class TT>
@@ -86,8 +96,6 @@ private:
     time_t timestamp;
     uuid_u tiebreaker;
 };
-
-RDB_SERIALIZE_TEMPLATED_OUTSIDE(versioned_t);
 
 template <class T>
 bool operator==(const versioned_t<T> &a, const versioned_t<T> &b) {

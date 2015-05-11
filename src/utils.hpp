@@ -8,7 +8,7 @@
 #include <functional>
 #include <string>
 
-#include "errors.hpp"
+#include "debug.hpp"
 #include "config/args.hpp"
 
 class printf_buffer_t;
@@ -41,7 +41,6 @@ void *rrealloc(void *ptr, size_t size);
 
 /* Forwards to the isfinite macro, or std::isfinite. */
 bool risfinite(double);
-
 
 class rng_t {
 public:
@@ -84,10 +83,13 @@ std::string vstrprintf(const char *format, va_list ap) __attribute__((format (pr
 // yyyy-mm-ddThh:mm:ss.nnnnnnnnn   (29 characters)
 const size_t formatted_time_length = 29;    // not including null
 
-void format_time(struct timespec time, printf_buffer_t *buf);
-std::string format_time(struct timespec time);
+enum class local_or_utc_time_t { local, utc };
+void format_time(struct timespec time, printf_buffer_t *buf, local_or_utc_time_t zone);
+std::string format_time(struct timespec time, local_or_utc_time_t zone);
 
-bool parse_time(const std::string &str, struct timespec *out, std::string *errmsg_out);
+bool parse_time(
+    const std::string &str, local_or_utc_time_t zone,
+    struct timespec *out, std::string *errmsg_out);
 
 /* Printing binary data to stderr in a nice format */
 void print_hd(const void *buf, size_t offset, size_t length);
@@ -133,12 +135,25 @@ bool blocking_read_file(const char *path, std::string *contents_out);
 template <class T>
 class assignment_sentry_t {
 public:
+    assignment_sentry_t() : var(nullptr), old_value() { }
     assignment_sentry_t(T *v, const T &value) :
-        var(v), old_value(*var) {
+            var(v), old_value(*var) {
         *var = value;
     }
     ~assignment_sentry_t() {
-        *var = old_value;
+        reset();
+    }
+    void reset(T *v, const T &value) {
+        reset();
+        var = v;
+        old_value = *var;
+        *var = value;
+    }
+    void reset() {
+        if (var != nullptr) {
+            *var = old_value;
+            var = nullptr;
+        }
     }
 private:
     T *var;
@@ -157,6 +172,8 @@ std::string errno_string(int errsv);
 // Contains the name of the directory in which all data is stored.
 class base_path_t {
 public:
+    // Constructs an empty path.
+    base_path_t() { }
     explicit base_path_t(const std::string& path);
     const std::string& path() const;
 
@@ -207,17 +224,17 @@ void remove_directory_recursive(const char *path);
 
 #define MSTR(x) stringify(x) // Stringify a macro
 #if defined __clang__
-#define COMPILER "CLANG " __clang_version__
+#define COMPILER_STR "CLANG " __clang_version__
 #elif defined __GNUC__
-#define COMPILER "GCC " MSTR(__GNUC__) "." MSTR(__GNUC_MINOR__) "." MSTR(__GNUC_PATCHLEVEL__)
+#define COMPILER_STR "GCC " MSTR(__GNUC__) "." MSTR(__GNUC_MINOR__) "." MSTR(__GNUC_PATCHLEVEL__)
 #else
-#define COMPILER "UNKNOWN COMPILER"
+#define COMPILER_STR "UNKNOWN COMPILER"
 #endif
 
 #ifndef NDEBUG
-#define RETHINKDB_VERSION_STR "rethinkdb " RETHINKDB_VERSION " (debug)" " (" COMPILER ")"
+#define RETHINKDB_VERSION_STR "rethinkdb " RETHINKDB_VERSION " (debug)" " (" COMPILER_STR ")"
 #else
-#define RETHINKDB_VERSION_STR "rethinkdb " RETHINKDB_VERSION " (" COMPILER ")"
+#define RETHINKDB_VERSION_STR "rethinkdb " RETHINKDB_VERSION " (" COMPILER_STR ")"
 #endif
 
 #define ANY_PORT 0

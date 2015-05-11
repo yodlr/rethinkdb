@@ -3,6 +3,9 @@
 #define CONTAINERS_BUFFER_GROUP_HPP_
 
 #include <stdlib.h>
+#include <unistd.h>
+#include <vector>
+
 #include <vector>
 
 #include "errors.hpp"

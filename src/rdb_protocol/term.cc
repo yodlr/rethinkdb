@@ -1,13 +1,16 @@
 // Copyright 2010-2014 RethinkDB, all rights reserved.
 #include "rdb_protocol/term.hpp"
 
+#include "arch/address.hpp"
+#include "clustering/administration/jobs/report.hpp"
 #include "containers/cow_ptr.hpp"
 #include "concurrency/cross_thread_watchable.hpp"
+#include "rdb_protocol/backtrace.hpp"
 #include "rdb_protocol/counted_term.hpp"
 #include "rdb_protocol/env.hpp"
 #include "rdb_protocol/func.hpp"
 #include "rdb_protocol/minidriver.hpp"
-#include "rdb_protocol/stream_cache.hpp"
+#include "rdb_protocol/query_cache.hpp"
 #include "rdb_protocol/term_walker.hpp"
 #include "rdb_protocol/validate.hpp"
 #include "rdb_protocol/terms/terms.hpp"
@@ -15,11 +18,12 @@
 
 namespace ql {
 
-counted_t<const term_t> compile_term(compile_env_t *env, protob_t<const Term> t) {
+counted_t<const term_t> compile_term(compile_env_t *env, const protob_t<const Term> t) {
     // HACK: per @srh, use unlimited array size at compile time
     ql::configured_limits_t limits = ql::configured_limits_t::unlimited;
     switch (t->type()) {
-    case Term::DATUM:              return make_datum_term(t, limits);
+    case Term::DATUM:              return make_datum_term(t, limits,
+                                                          reql_version_t::LATEST);
     case Term::MAKE_ARRAY:         return make_make_array_term(env, t);
     case Term::MAKE_OBJ:           return make_make_obj_term(env, t);
     case Term::BINARY:             return make_binary_term(env, t);
@@ -55,7 +59,7 @@ counted_t<const term_t> compile_term(compile_env_t *env, protob_t<const Term> t)
     case Term::SET_DIFFERENCE:     return make_set_difference_term(env, t);
     case Term::SLICE:              return make_slice_term(env, t);
     case Term::GET_FIELD:          return make_get_field_term(env, t);
-    case Term::INDEXES_OF:         return make_indexes_of_term(env, t);
+    case Term::OFFSETS_OF:         return make_offsets_of_term(env, t);
     case Term::KEYS:               return make_keys_term(env, t);
     case Term::OBJECT:             return make_object_term(env, t);
     case Term::HAS_FIELDS:         return make_has_fields_term(env, t);
@@ -65,14 +69,15 @@ counted_t<const term_t> compile_term(compile_env_t *env, protob_t<const Term> t)
     case Term::MERGE:              return make_merge_term(env, t);
     case Term::LITERAL:            return make_literal_term(env, t);
     case Term::ARGS:               return make_args_term(env, t);
+    case Term::BETWEEN_DEPRECATED: return make_between_deprecated_term(env, t);
     case Term::BETWEEN:            return make_between_term(env, t);
     case Term::CHANGES:            return make_changes_term(env, t);
     case Term::REDUCE:             return make_reduce_term(env, t);
     case Term::MAP:                return make_map_term(env, t);
     case Term::FILTER:             return make_filter_term(env, t);
-    case Term::CONCAT_MAP:          return make_concatmap_term(env, t);
+    case Term::CONCAT_MAP:         return make_concatmap_term(env, t);
     case Term::GROUP:              return make_group_term(env, t);
-    case Term::ORDER_BY:            return make_orderby_term(env, t);
+    case Term::ORDER_BY:           return make_orderby_term(env, t);
     case Term::DISTINCT:           return make_distinct_term(env, t);
     case Term::COUNT:              return make_count_term(env, t);
     case Term::SUM:                return make_sum_term(env, t);
@@ -95,7 +100,7 @@ counted_t<const term_t> compile_term(compile_env_t *env, protob_t<const Term> t)
     case Term::SPLICE_AT:          return make_splice_at_term(env, t);
     case Term::COERCE_TO:          return make_coerce_term(env, t);
     case Term::UNGROUP:            return make_ungroup_term(env, t);
-    case Term::TYPE_OF:             return make_typeof_term(env, t);
+    case Term::TYPE_OF:            return make_typeof_term(env, t);
     case Term::UPDATE:             return make_update_term(env, t);
     case Term::DELETE:             return make_delete_term(env, t);
     case Term::REPLACE:            return make_replace_term(env, t);
@@ -106,9 +111,11 @@ counted_t<const term_t> compile_term(compile_env_t *env, protob_t<const Term> t)
     case Term::TABLE_CREATE:       return make_table_create_term(env, t);
     case Term::TABLE_DROP:         return make_table_drop_term(env, t);
     case Term::TABLE_LIST:         return make_table_list_term(env, t);
-    case Term::TABLE_CONFIG:       return make_table_config_term(env, t);
-    case Term::TABLE_STATUS:       return make_table_status_term(env, t);
+    case Term::CONFIG:             return make_config_term(env, t);
+    case Term::STATUS:             return make_status_term(env, t);
+    case Term::WAIT:               return make_wait_term(env, t);
     case Term::RECONFIGURE:        return make_reconfigure_term(env, t);
+    case Term::REBALANCE:          return make_rebalance_term(env, t);
     case Term::SYNC:               return make_sync_term(env, t);
     case Term::INDEX_CREATE:       return make_sindex_create_term(env, t);
     case Term::INDEX_DROP:         return make_sindex_drop_term(env, t);
@@ -118,9 +125,9 @@ counted_t<const term_t> compile_term(compile_env_t *env, protob_t<const Term> t)
     case Term::INDEX_RENAME:       return make_sindex_rename_term(env, t);
     case Term::FUNCALL:            return make_funcall_term(env, t);
     case Term::BRANCH:             return make_branch_term(env, t);
-    case Term::ANY:                return make_any_term(env, t);
-    case Term::ALL:                return make_all_term(env, t);
-    case Term::FOR_EACH:            return make_foreach_term(env, t);
+    case Term::OR:                 return make_or_term(env, t);
+    case Term::AND:                return make_and_term(env, t);
+    case Term::FOR_EACH:           return make_foreach_term(env, t);
     case Term::FUNC:               return make_counted<func_term_t>(env, t);
     case Term::ASC:                return make_asc_term(env, t);
     case Term::DESC:               return make_desc_term(env, t);
@@ -190,20 +197,44 @@ counted_t<const term_t> compile_term(compile_env_t *env, protob_t<const Term> t)
     case Term::GET_NEAREST:        return make_get_nearest_term(env, t);
     case Term::UUID:               return make_uuid_term(env, t);
     case Term::POLYGON_SUB:        return make_polygon_sub_term(env, t);
+    case Term::MINVAL:             return make_minval_term(env, t);
+    case Term::MAXVAL:             return make_maxval_term(env, t);
+    case Term::FLOOR:              return make_floor_term(env, t);
+    case Term::CEIL:               return make_ceil_term(env, t);
+    case Term::ROUND:              return make_round_term(env, t);
     default: unreachable();
     }
     unreachable();
 }
 
-void run(protob_t<Query> q,
-         rdb_context_t *ctx,
-         signal_t *interruptor,
-         stream_cache_t *stream_cache,
-         Response *res) {
+// If the query wants a reply, we can release the query id, which is
+// only used for tracking the ordering of noreply queries for the
+// purpose of noreply_wait.
+void maybe_release_query_id(query_id_t &&id,
+                            const protob_t<Query> &query) {
+    if (!is_noreply(query)) {
+        query_id_t destroyer(std::move(id));
+    }
+}
+
+void run(query_id_t &&query_id,
+         protob_t<Query> q,
+         Response *res,
+         query_cache_t *query_cache,
+         signal_t *interruptor) {
     try {
         validate_pb(*q);
     } catch (const base_exc_t &e) {
-        fill_error(res, Response::CLIENT_ERROR, e.what(), backtrace_t());
+        fill_error(res, Response::CLIENT_ERROR, e.what(),
+                   backtrace_registry_t::EMPTY_BACKTRACE);
+        return;
+    }
+
+    try {
+        validate_optargs(*q);
+    } catch (const base_exc_t &e) {
+        fill_error(res, Response::COMPILE_ERROR, e.what(),
+                   backtrace_registry_t::EMPTY_BACKTRACE);
         return;
     }
 #ifdef INSTRUMENT
@@ -213,145 +244,44 @@ void run(protob_t<Query> q,
     int64_t token = q->token();
     use_json_t use_json = q->accepts_r_json() ? use_json_t::YES : use_json_t::NO;
 
-    switch (q->type()) {
-    case Query_QueryType_START: {
-        const profile_bool_t profile = profile_bool_optarg(q);
-        const scoped_ptr_t<profile::trace_t> trace = maybe_make_profile_trace(profile);
-        env_t env(ctx, interruptor, global_optargs(q), trace.get_or_null());
-
-        counted_t<const term_t> root_term;
-        try {
-            Term *t = q->mutable_query();
-            compile_env_t compile_env((var_visibility_t()));
-            root_term = compile_term(&compile_env, q.make_child(t));
-        } catch (const exc_t &e) {
-            fill_error(res, Response::COMPILE_ERROR, e.what(), e.backtrace());
-            return;
-        } catch (const datum_exc_t &e) {
-            fill_error(res, Response::COMPILE_ERROR, e.what(), backtrace_t());
-            return;
-        }
-
-        try {
-            rcheck_toplevel(!stream_cache->contains(token),
-                            base_exc_t::GENERIC,
-                            strprintf("ERROR: duplicate token %" PRIi64, token));
-        } catch (const exc_t &e) {
-            fill_error(res, Response::CLIENT_ERROR, e.what(), e.backtrace());
-            return;
-        } catch (const datum_exc_t &e) {
-            fill_error(res, Response::CLIENT_ERROR, e.what(), backtrace_t());
-            return;
-        }
-
-        try {
-            scope_env_t scope_env(&env, var_scope_t());
-            scoped_ptr_t<val_t> val = root_term->eval(&scope_env);
-            if (val->get_type().is_convertible(val_t::type_t::DATUM)) {
-                res->set_type(Response::SUCCESS_ATOM);
-                datum_t d = val->as_datum();
-                d.write_to_protobuf(res->add_response(), use_json);
-                if (trace.has()) {
-                    trace->as_datum().write_to_protobuf(
-                        res->mutable_profile(), use_json);
-                }
-            } else if (counted_t<grouped_data_t> gd
-                       = val->maybe_as_promiscuous_grouped_data(scope_env.env)) {
-                res->set_type(Response::SUCCESS_ATOM);
-                datum_t d = to_datum_for_client_serialization(std::move(*gd),
-                                                              env.reql_version(),
-                                                              env.limits());
-                d.write_to_protobuf(res->add_response(), use_json);
-                if (env.trace != nullptr) {
-                    env.trace->as_datum().write_to_protobuf(
-                        res->mutable_profile(), use_json);
-                }
-            } else if (val->get_type().is_convertible(val_t::type_t::SEQUENCE)) {
-                counted_t<datum_stream_t> seq = val->as_seq(&env);
-                const datum_t arr = seq->as_array(&env);
-                if (arr.has()) {
-                    res->set_type(Response::SUCCESS_ATOM);
-                    arr.write_to_protobuf(res->add_response(), use_json);
-                    if (trace.has()) {
-                        trace->as_datum().write_to_protobuf(
-                            res->mutable_profile(), use_json);
-                    }
-                } else {
-                    stream_cache->insert(token,
-                                         use_json,
-                                         env.get_all_optargs(),
-                                         profile,
-                                         seq);
-                    bool b = stream_cache->serve(token, res, interruptor);
-                    r_sanity_check(b);
-                }
-            } else {
-                rfail_toplevel(base_exc_t::GENERIC,
-                               "Query result must be of type "
-                               "DATUM, GROUPED_DATA, or STREAM (got %s).",
-                               val->get_type().name());
-            }
-        } catch (const exc_t &e) {
-            fill_error(res, Response::RUNTIME_ERROR, e.what(), e.backtrace());
-            return;
-        } catch (const datum_exc_t &e) {
-            fill_error(res, Response::RUNTIME_ERROR, e.what(), backtrace_t());
-            return;
-        }
-    } break;
-    case Query_QueryType_CONTINUE: {
-        try {
-            bool b = stream_cache->serve(token, res, interruptor);
-            if (!b) {
-                auto err = strprintf("Token %" PRIi64 " not in stream cache.", token);
-                fill_error(res, Response::CLIENT_ERROR, err, backtrace_t());
-            }
-        } catch (const exc_t &e) {
-            fill_error(res, Response::RUNTIME_ERROR, e.what(), e.backtrace());
-            return;
-        } catch (const datum_exc_t &e) {
-            fill_error(res, Response::RUNTIME_ERROR, e.what(), backtrace_t());
-            return;
-        }
-    } break;
-    case Query_QueryType_STOP: {
-        try {
-            rcheck_toplevel(stream_cache->contains(token), base_exc_t::GENERIC,
-                            strprintf("Token %" PRIi64 " not in stream cache.", token));
-            stream_cache->erase(token);
+    try {
+        switch (q->type()) {
+        case Query_QueryType_START: {
+            maybe_release_query_id(std::move(query_id), q);
+            scoped_ptr_t<query_cache_t::ref_t> query_ref =
+                query_cache->create(token, q, use_json, interruptor);
+            query_ref->fill_response(res);
+        } break;
+        case Query_QueryType_CONTINUE: {
+            maybe_release_query_id(std::move(query_id), q);
+            scoped_ptr_t<query_cache_t::ref_t> query_ref =
+                query_cache->get(token, use_json, interruptor);
+            query_ref->fill_response(res);
+        } break;
+        case Query_QueryType_STOP: {
+            query_cache->terminate_query(token);
             res->set_type(Response::SUCCESS_SEQUENCE);
-        } catch (const exc_t &e) {
-            fill_error(res, Response::CLIENT_ERROR, e.what(), e.backtrace());
-            return;
+        } break;
+        case Query_QueryType_NOREPLY_WAIT: {
+            query_cache->noreply_wait(query_id, token, interruptor);
+            res->set_type(Response::WAIT_COMPLETE);
+        } break;
+        default: unreachable();
         }
-    } break;
-    case Query_QueryType_NOREPLY_WAIT: {
-        try {
-            rcheck_toplevel(!stream_cache->contains(token),
-                            base_exc_t::GENERIC,
-                            strprintf("ERROR: duplicate token %" PRIi64, token));
-        } catch (const exc_t &e) {
-            fill_error(res, Response::CLIENT_ERROR, e.what(), e.backtrace());
-            return;
-        } catch (const datum_exc_t &e) {
-            fill_error(res, Response::CLIENT_ERROR, e.what(), backtrace_t());
-            return;
-        }
-
-        // NOREPLY_WAIT is just a no-op.
-        // This works because we only evaluate one Query at a time
-        // on the connection level. Once we get to the NOREPLY_WAIT Query
-        // we know that all previous Queries have completed processing.
-
-        // Send back a WAIT_COMPLETE response.
-        res->set_type(Response::WAIT_COMPLETE);
-    } break;
-    default: unreachable();
+    } catch (const bt_exc_t &ex) {
+        fill_error(res, ex.response_type, ex.message, ex.bt_datum);
     }
 }
 
+runtime_term_t::runtime_term_t(backtrace_id_t bt)
+    : bt_rcheckable_t(bt) { }
+
+runtime_term_t::~runtime_term_t() { }
+
 term_t::term_t(protob_t<const Term> _src)
-    : pb_rcheckable_t(get_backtrace(_src)), src(_src) { }
+    : runtime_term_t(backtrace_id_t(_src.get())),
+      src(_src) { }
+
 term_t::~term_t() { }
 
 // Uncomment the define to enable instrumentation (you'll be able to see where
@@ -377,14 +307,10 @@ protob_t<const Term> term_t::get_src() const {
     return src;
 }
 
-void term_t::prop_bt(Term *t) const {
-    propagate_backtrace(t, &get_src()->GetExtension(ql2::extension::backtrace));
-}
-
-scoped_ptr_t<val_t> term_t::eval(scope_env_t *env, eval_flags_t eval_flags) const {
+scoped_ptr_t<val_t> runtime_term_t::eval(scope_env_t *env, eval_flags_t eval_flags) const {
     // This is basically a hook for unit tests to change things mid-query
     profile::starter_t starter(strprintf("Evaluating %s.", name()), env->env->trace);
-    DEBUG_ONLY_CODE(env->env->do_eval_callback());
+    env->env->do_eval_callback();
     DBG("EVALUATING %s (%d):\n", name(), is_deterministic());
     if (env->env->interruptor->is_pulsed()) {
         throw interrupted_exc_t();
@@ -392,7 +318,9 @@ scoped_ptr_t<val_t> term_t::eval(scope_env_t *env, eval_flags_t eval_flags) cons
     env->env->maybe_yield();
     INC_DEPTH;
 
+#ifdef INSTRUMENT
     try {
+#endif // INSTRUMENT
         try {
             scoped_ptr_t<val_t> ret = term_eval(env, eval_flags);
             DEC_DEPTH;
@@ -403,46 +331,13 @@ scoped_ptr_t<val_t> term_t::eval(scope_env_t *env, eval_flags_t eval_flags) cons
             DBG("%s THREW\n", name());
             rfail(e.get_type(), "%s", e.what());
         }
+#ifdef INSTRUMENT
     } catch (...) {
         DEC_DEPTH;
         DBG("%s THREW OUTER\n", name());
         throw;
     }
-}
-
-scoped_ptr_t<val_t> term_t::new_val(datum_t d) const {
-    return make_scoped<val_t>(d, backtrace());
-}
-scoped_ptr_t<val_t> term_t::new_val(datum_t d,
-                                    counted_t<table_t> t) const {
-    return make_scoped<val_t>(d, t, backtrace());
-}
-
-scoped_ptr_t<val_t> term_t::new_val(datum_t d,
-                                    datum_t orig_key,
-                                    counted_t<table_t> t) const {
-    return make_scoped<val_t>(d, orig_key, t, backtrace());
-}
-
-scoped_ptr_t<val_t> term_t::new_val(env_t *env,
-                                    counted_t<datum_stream_t> s) const {
-    return make_scoped<val_t>(env, s, backtrace());
-}
-scoped_ptr_t<val_t> term_t::new_val(counted_t<datum_stream_t> s,
-                                    counted_t<table_t> d) const {
-    return make_scoped<val_t>(d, s, backtrace());
-}
-scoped_ptr_t<val_t> term_t::new_val(counted_t<const db_t> db) const {
-    return make_scoped<val_t>(db, backtrace());
-}
-scoped_ptr_t<val_t> term_t::new_val(counted_t<table_t> t) const {
-    return make_scoped<val_t>(t, backtrace());
-}
-scoped_ptr_t<val_t> term_t::new_val(counted_t<const func_t> f) const {
-    return make_scoped<val_t>(f, backtrace());
-}
-scoped_ptr_t<val_t> term_t::new_val_bool(bool b) const {
-    return new_val(datum_t::boolean(b));
+#endif // INSTRUMENT
 }
 
 } // namespace ql

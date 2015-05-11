@@ -1,6 +1,7 @@
 // Copyright 2010-2014 RethinkDB, all rights reserved.
 #include "concurrency/watchable_transform.hpp"
 
+#include "arch/runtime/coroutines.hpp"
 #include "stl_utils.hpp"
 
 template<class key1_t, class value1_t, class key2_t, class value2_t>
@@ -9,13 +10,12 @@ watchable_map_transform_t<key1_t, value1_t, key2_t, value2_t>::watchable_map_tra
     inner(_inner),
     all_subs(inner,
         [this](const key1_t &key1, const value1_t *value1) {
-            rwi_lock_assertion_t::write_acq_t write_acq(&rwi_lock);
+            rwi_lock_assertion_t::write_acq_t write_acq(&(this->rwi_lock));
             key2_t key2;
             if (this->key_1_to_2(key1, &key2)) {
                 if (value1 != nullptr) {
                     const value2_t *value2;
                     this->value_1_to_2(value1, &value2);
-                    guarantee(value2 != nullptr);
                     this->do_notify_change(key2, value2, &write_acq);
                 } else {
                     this->do_notify_change(key2, nullptr, &write_acq);
@@ -48,8 +48,9 @@ watchable_map_transform_t<key1_t, value1_t, key2_t, value2_t>::get_key(
         if (value1 != nullptr) {
             const value2_t *value2;
             this->value_1_to_2(value1, &value2);
-            guarantee(value2 != nullptr);
-            res = boost::optional<value2_t>(*value2);
+            if (value2 != nullptr) {
+                res = boost::optional<value2_t>(*value2);
+            }
         }
     });
     return res;
@@ -63,7 +64,9 @@ void watchable_map_transform_t<key1_t, value1_t, key2_t, value2_t>::read_all(
         if (this->key_1_to_2(key1, &key2)) {
             const value2_t *value2;
             this->value_1_to_2(value1, &value2);
-            cb(key2, value2);
+            if (value2 != nullptr) {
+                cb(key2, value2);
+            }
         }
     });
 }
@@ -80,7 +83,6 @@ void watchable_map_transform_t<key1_t, value1_t, key2_t, value2_t>::read_key(
         if (value1 != nullptr) {
             const value2_t *value2;
             this->value_1_to_2(value1, &value2);
-            guarantee(value2 != nullptr);
             cb(value2);
         } else {
             cb(nullptr);
@@ -104,7 +106,7 @@ clone_ptr_t<watchable_t<boost::optional<value_t> > > get_watchable_for_key(
             map(_map), key(_key),
             subs(map, key,
                 [this](const value_t *) {
-                    rwi_lock_assertion_t::write_acq_t acq(&rwi_lock);
+                     rwi_lock_assertion_t::write_acq_t acq(&(this->rwi_lock));
                     publisher.publish([](const std::function<void()> &f) { f(); });
                 },
                 false)
@@ -159,41 +161,62 @@ watchable_map_entry_copier_t<key_t, value_t>::~watchable_map_entry_copier_t() {
     }
 }
 
-template<class value_t>
-watchable_buffer_t<value_t>::watchable_buffer_t(
-            clone_ptr_t<watchable_t<value_t> > _input,
-            int64_t _delay) :
-        input(_input),
-        delay(_delay),
-        coro_running(false),
-        output(value_t()),
-        subs(std::bind(&watchable_buffer_t::notify, this)) {
-    typename watchable_t<value_t>::freeze_t freeze(input);
-    subs.reset(input, &freeze);
-    output.set_value_no_equals(input->get());
+template<class tag_t, class key_t, class value_t>
+watchable_map_combiner_t<tag_t, key_t, value_t>::source_t::source_t(
+        watchable_map_combiner_t *_parent,
+        const tag_t &tag,
+        watchable_map_t<key_t, value_t> *inner) :
+    parent(_parent),
+    sentry(&parent->map, tag, inner),
+    subs(inner, std::bind(&source_t::on_change, this, ph::_1, ph::_2), true)
+    { }
+
+template<class tag_t, class key_t, class value_t>
+void watchable_map_combiner_t<tag_t, key_t, value_t>::source_t::on_change(
+        const key_t &key, const value_t *value) {
+    rwi_lock_assertion_t::write_acq_t write_acq(&parent->rwi_lock);
+    parent->notify_change(std::make_pair(sentry.get_key(), key), value, &write_acq);
 }
 
-template<class value_t>
-void watchable_buffer_t<value_t>::notify() {
-    if (!coro_running) {
-        coro_running = true;
-        auto_drainer_t::lock_t keepalive(&drainer);
-        coro_t::spawn_sometime([this, keepalive]() {
-            signal_timer_t timer;
-            timer.start(delay);
-            try {
-                wait_interruptible(&timer, keepalive.get_drain_signal());
-            } catch (interrupted_exc_t) {
-                /* We're being destroyed. The latest updates won't get delivered but
-                that's OK. */
-                return;
-            }
-            /* It's important that we set `coro_running` to `false` before delivering the
-            update, so that if `output.set_value_no_equals()` somehow causes `notify` to
-            be called again, the new update will still get delivered eventually. */
-            coro_running = false;
-            output.set_value_no_equals(input->get());
+template<class tag_t, class key_t, class value_t>
+std::map<std::pair<tag_t, key_t>, value_t>
+watchable_map_combiner_t<tag_t, key_t, value_t>::get_all() {
+    std::map<std::pair<tag_t, key_t>, value_t> res;
+    read_all([&](const std::pair<tag_t, key_t> &key, const value_t *value) {
+        res.insert(std::make_pair(key, *value));
+    });
+    return res;
+}
+
+template<class tag_t, class key_t, class value_t>
+boost::optional<value_t> watchable_map_combiner_t<tag_t, key_t, value_t>::get_key(
+        const std::pair<tag_t, key_t> &key) {
+    auto it = map.find(key.first);
+    if (it == map.end()) {
+        return boost::none;
+    }
+    return it->second->get_key(key.second);
+}
+
+template<class tag_t, class key_t, class value_t>
+void watchable_map_combiner_t<tag_t, key_t, value_t>::read_all(
+        const std::function<void(
+            const std::pair<tag_t, key_t> &, const value_t *)> &callback) {
+    for (const auto &pair : map) {
+        pair.second->read_all([&](const key_t &key, const value_t *value) {
+            callback(std::make_pair(pair.first, key), value);
         });
     }
+}
+
+template<class tag_t, class key_t, class value_t>
+void watchable_map_combiner_t<tag_t, key_t, value_t>::read_key(
+        const std::pair<tag_t, key_t> &key,
+        const std::function<void(const value_t *)> &callback) {
+    auto it = map.find(key.first);
+    if (it == map.end()) {
+        callback(nullptr);
+    }
+    it->second->read_key(key.second, callback);
 }
 

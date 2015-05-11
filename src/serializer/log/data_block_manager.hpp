@@ -5,7 +5,6 @@
 #include <vector>
 
 #include "arch/types.hpp"
-#include "containers/bitset.hpp"
 #include "containers/intrusive_list.hpp"
 #include "containers/priority_queue.hpp"
 #include "containers/scoped.hpp"
@@ -84,6 +83,7 @@ public:
     std::vector<std::vector<counted_t<ls_block_token_pointee_t> > >
     gimme_some_new_offsets(const std::vector<buf_write_info_t> &writes);
 
+    bool is_gc_active() const;
 
 private:
     void actually_shutdown();

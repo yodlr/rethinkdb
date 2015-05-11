@@ -5,6 +5,8 @@
 #include <map>
 #include <string>
 
+#include "rapidjson/stringbuffer.h"
+#include "rapidjson/writer.h"
 #include "rdb_protocol/error.hpp"
 #include "rdb_protocol/func.hpp"
 #include "rdb_protocol/op.hpp"
@@ -24,6 +26,7 @@ static const int MAX_TYPE = 10;
 
 static const int DB_TYPE = val_t::type_t::DB * MAX_TYPE;
 static const int TABLE_TYPE = val_t::type_t::TABLE * MAX_TYPE;
+static const int TABLE_SLICE_TYPE = val_t::type_t::TABLE_SLICE * MAX_TYPE;
 static const int SELECTION_TYPE = val_t::type_t::SELECTION * MAX_TYPE;
 static const int ARRAY_SELECTION_TYPE = SELECTION_TYPE + datum_t::R_ARRAY;
 static const int SEQUENCE_TYPE = val_t::type_t::SEQUENCE * MAX_TYPE;
@@ -39,12 +42,15 @@ static const int R_NUM_TYPE = val_t::type_t::DATUM * MAX_TYPE + datum_t::R_NUM;
 static const int R_STR_TYPE = val_t::type_t::DATUM * MAX_TYPE + datum_t::R_STR;
 static const int R_ARRAY_TYPE = val_t::type_t::DATUM * MAX_TYPE + datum_t::R_ARRAY;
 static const int R_OBJECT_TYPE = val_t::type_t::DATUM * MAX_TYPE + datum_t::R_OBJECT;
+static const int MINVAL_TYPE = val_t::type_t::DATUM * MAX_TYPE + datum_t::MINVAL;
+static const int MAXVAL_TYPE = val_t::type_t::DATUM * MAX_TYPE + datum_t::MAXVAL;
 
 class coerce_map_t {
 public:
     coerce_map_t() {
         map["DB"] = DB_TYPE;
         map["TABLE"] = TABLE_TYPE;
+        map["TABLE_SLICE"] = TABLE_SLICE_TYPE;
         map["SELECTION<STREAM>"] = SELECTION_TYPE;
         map["SELECTION<ARRAY>"] = ARRAY_SELECTION_TYPE;
         map["STREAM"] = SEQUENCE_TYPE;
@@ -61,7 +67,9 @@ public:
         map["STRING"] = R_STR_TYPE;
         map["ARRAY"] = R_ARRAY_TYPE;
         map["OBJECT"] = R_OBJECT_TYPE;
-        CT_ASSERT(datum_t::R_STR < MAX_TYPE);
+        map["MINVAL"] = MINVAL_TYPE;
+        map["MAXVAL"] = MAXVAL_TYPE;
+        CT_ASSERT(datum_t::MAXVAL < MAX_TYPE);
 
         for (std::map<std::string, int>::iterator
                  it = map.begin(); it != map.end(); ++it) {
@@ -97,6 +105,7 @@ private:
         switch (t) {
         case val_t::type_t::DB:
         case val_t::type_t::TABLE:
+        case val_t::type_t::TABLE_SLICE:
         case val_t::type_t::SELECTION:
         case val_t::type_t::SEQUENCE:
         case val_t::type_t::SINGLE_SELECTION:
@@ -114,6 +123,8 @@ private:
         case datum_t::R_STR:
         case datum_t::R_ARRAY:
         case datum_t::R_OBJECT:
+        case datum_t::MINVAL:
+        case datum_t::MAXVAL:
         default: break;
         }
     }
@@ -132,7 +143,7 @@ static val_t::type_t::raw_type_t supertype(int type) {
     return static_cast<val_t::type_t::raw_type_t>(type / MAX_TYPE);
 }
 static datum_t::type_t subtype(int type) {
-    return static_cast<datum_t::type_t>(type - supertype(type));
+    return static_cast<datum_t::type_t>(type % MAX_TYPE);
 }
 static int merge_types(int supertype, int subtype) {
     return supertype * MAX_TYPE + subtype;
@@ -143,7 +154,8 @@ public:
     coerce_term_t(compile_env_t *env, const protob_t<const Term> &term)
         : op_term_t(env, term, argspec_t(2)) { }
 private:
-    virtual scoped_ptr_t<val_t> eval_impl(scope_env_t *env, args_t *args, eval_flags_t) const {
+    virtual scoped_ptr_t<val_t> eval_impl(
+        scope_env_t *env, args_t *args, eval_flags_t) const {
         scoped_ptr_t<val_t> val = args->arg(env, 0);
         val_t::type_t opaque_start_type = val->get_type();
         int start_supertype = opaque_start_type.raw_type;
@@ -178,7 +190,16 @@ private:
 
                 // DATUM -> STR
                 if (end_type == R_STR_TYPE) {
-                    return new_val(datum_t(datum_string_t(d.print())));
+                    if (env->env->reql_version() < reql_version_t::v2_1) {
+                        return new_val(datum_t(
+                            datum_string_t(d.print(env->env->reql_version()))));
+                    } else {
+                        rapidjson::StringBuffer buffer;
+                        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+                        d.write_json(&writer);
+                        return new_val(datum_t(
+                            datum_string_t(buffer.GetSize(), buffer.GetString())));
+                    }
                 }
 
                 // OBJECT -> ARRAY
@@ -265,22 +286,20 @@ public:
     ungroup_term_t(compile_env_t *env, const protob_t<const Term> &term)
         : op_term_t(env, term, argspec_t(1)) { }
 private:
-    virtual scoped_ptr_t<val_t> eval_impl(scope_env_t *env, args_t *args, eval_flags_t) const {
+    virtual scoped_ptr_t<val_t> eval_impl(
+        scope_env_t *env, args_t *args, eval_flags_t) const {
         counted_t<grouped_data_t> groups
             = args->arg(env, 0)->as_promiscuous_grouped_data(env->env);
         std::vector<datum_t> v;
         v.reserve(groups->size());
 
-        iterate_ordered_by_version(
-            env->env->reql_version(),
-            *groups,
-            [&v](const datum_t &key, datum_t &value) {
-                r_sanity_check(key.has() && value.has());
-                std::map<datum_string_t, datum_t> m =
-                    {{datum_string_t("group"), key},
-                     {datum_string_t("reduction"), std::move(value)}};
-                v.push_back(datum_t(std::move(m)));
-            });
+        for (auto &&pair : *groups) {
+            r_sanity_check(pair.first.has() && pair.second.has());
+            std::map<datum_string_t, datum_t> m =
+                {{datum_string_t("group"), pair.first},
+                 {datum_string_t("reduction"), std::move(pair.second)}};
+            v.push_back(datum_t(std::move(m)));
+        }
         return new_val(datum_t(std::move(v), env->env->limits()));
     }
     virtual const char *name() const { return "ungroup"; }
@@ -292,7 +311,7 @@ int val_type(const scoped_ptr_t<val_t> &v) {
     if (t == DATUM_TYPE) {
         t += v->as_datum().get_type();
     } else if (t == SELECTION_TYPE) {
-        if (v->sequence()->is_array()) {
+        if (v->selection()->seq->is_array()) {
             t += datum_t::R_ARRAY;
         }
     }
@@ -339,27 +358,60 @@ private:
 
         switch (type) {
         case DB_TYPE: {
-            b |= info.add("name", datum_t(datum_string_t(v->as_db()->name)));
+            b |= info.add("name", datum_t(datum_string_t(v->as_db()->name.str())));
+            b |= info.add("id",
+                          v->as_db()->id.is_nil() ?
+                              datum_t::null() :
+                              datum_t(datum_string_t(uuid_to_str(v->as_db()->id))));
         } break;
         case TABLE_TYPE: {
             counted_t<table_t> table = v->as_table();
             b |= info.add("name", datum_t(datum_string_t(table->name)));
             b |= info.add("primary_key",
                           datum_t(datum_string_t(table->get_pkey())));
-            b |= info.add("indexes", table->sindex_list(env->env));
             b |= info.add("db", val_info(env, new_val(table->db)));
+            b |= info.add("id", table->get_id());
+            name_string_t name = name_string_t::guarantee_valid(table->name.c_str());
+            {
+                std::string error;
+                std::vector<int64_t> doc_counts;
+                if (!env->env->reql_cluster_interface()->table_estimate_doc_counts(
+                        table->db, name, env->env, &doc_counts, &error)) {
+                    rfail(base_exc_t::GENERIC, "%s", error.c_str());
+                }
+                datum_array_builder_t arr(configured_limits_t::unlimited);
+                for (int64_t i : doc_counts) {
+                    arr.add(datum_t(static_cast<double>(i)));
+                }
+                b |= info.add("doc_count_estimates", std::move(arr).to_datum());
+            }
+            {
+                std::string error;
+                std::map<std::string, std::pair<sindex_config_t, sindex_status_t> >
+                    configs_and_statuses;
+                if (!env->env->reql_cluster_interface()->sindex_list(
+                        table->db, name, env->env->interruptor,
+                        &error, &configs_and_statuses)) {
+                    rfail(base_exc_t::GENERIC, "%s", error.c_str());
+                }
+                ql::datum_array_builder_t res(ql::configured_limits_t::unlimited);
+                for (const auto &pair : configs_and_statuses) {
+                    res.add(ql::datum_t(datum_string_t(pair.first)));
+                }
+                b |= info.add("indexes", std::move(res).to_datum());
+            }
         } break;
         case SELECTION_TYPE: {
             b |= info.add("table",
-                          val_info(env, new_val(v->as_selection(env->env).first)));
+                          val_info(env, new_val(v->as_selection(env->env)->table)));
         } break;
         case ARRAY_SELECTION_TYPE: {
             b |= info.add("table",
-                          val_info(env, new_val(v->as_selection(env->env).first)));
+                          val_info(env, new_val(v->as_selection(env->env)->table)));
         } break;
         case SINGLE_SELECTION_TYPE: {
             b |= info.add("table",
-                          val_info(env, new_val(v->as_single_selection().first)));
+                          val_info(env, new_val(v->as_single_selection()->get_tbl())));
         } break;
         case SEQUENCE_TYPE: {
             if (v->as_seq(env->env)->is_grouped()) {
@@ -388,7 +440,8 @@ private:
         case R_OBJECT_TYPE: // fallthru
         case DATUM_TYPE: {
             b |= info.add("value",
-                          datum_t(datum_string_t(v->as_datum().print())));
+                          datum_t(datum_string_t(
+                              v->as_datum().print(env->env->reql_version()))));
         } break;
 
         default: r_sanity_check(false);
@@ -402,19 +455,19 @@ private:
 };
 
 counted_t<term_t> make_coerce_term(
-    compile_env_t *env, const protob_t<const Term> &term) {
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<coerce_term_t>(env, term);
 }
 counted_t<term_t> make_ungroup_term(
-    compile_env_t *env, const protob_t<const Term> &term) {
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<ungroup_term_t>(env, term);
 }
 counted_t<term_t> make_typeof_term(
-    compile_env_t *env, const protob_t<const Term> &term) {
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<typeof_term_t>(env, term);
 }
 counted_t<term_t> make_info_term(
-    compile_env_t *env, const protob_t<const Term> &term) {
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<info_term_t>(env, term);
 }
 

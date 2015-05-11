@@ -6,13 +6,6 @@
 
 namespace archive_internal {
 
-// This is used to implement serialize_cluster_version and
-// deserialize_cluster_version.  (cluster_version_t conveniently has a contiguous set
-// of valid representation, from v1_13 to v1_15_is_latest).
-ARCHIVE_PRIM_MAKE_RANGED_SERIALIZABLE(cluster_version_t, int8_t,
-                                      cluster_version_t::v1_13,
-                                      cluster_version_t::v1_15_is_latest);
-
 class bogus_made_up_type_t;
 
 }  // namespace archive_internal
@@ -22,17 +15,29 @@ class bogus_made_up_type_t;
 // range error with the specific removed values.  Or maybe, we would do something
 // differently.
 inline void serialize_cluster_version(write_message_t *wm, cluster_version_t v) {
-    archive_internal::serialize<cluster_version_t::LATEST_OVERALL>(wm, v);
+    int8_t raw = static_cast<int8_t>(v);
+    serialize<cluster_version_t::LATEST_OVERALL>(wm, raw);
 }
 
-inline MUST_USE archive_result_t deserialize_cluster_version(read_stream_t *s,
-                                                             cluster_version_t *thing) {
+inline MUST_USE archive_result_t deserialize_cluster_version(
+    read_stream_t *s, cluster_version_t *thing, const char *v1_13_msg) {
     // Initialize `thing` to *something* because GCC 4.6.3 thinks that `thing`
     // could be used uninitialized, even when the return value of this function
     // is checked through `guarantee_deserialization()`.
     // See https://github.com/rethinkdb/rethinkdb/issues/2640
     *thing = cluster_version_t::LATEST_OVERALL;
-    return archive_internal::deserialize<cluster_version_t::LATEST_OVERALL>(s, thing);
+    int8_t raw;
+    archive_result_t res = deserialize<cluster_version_t::LATEST_OVERALL>(s, &raw);
+    if (raw == static_cast<int8_t>(obsolete_cluster_version_t::v1_13)
+        || raw == static_cast<int8_t>(obsolete_cluster_version_t::v1_13_2)) {
+        fail_due_to_user_error("%s", v1_13_msg);
+    } else {
+        // This is the same rassert in `ARCHIVE_PRIM_MAKE_RANGED_SERIALIZABLE`.
+        rassert(raw >= static_cast<int8_t>(cluster_version_t::v1_14)
+                && raw <= static_cast<int8_t>(cluster_version_t::v2_1_is_latest));
+        *thing = static_cast<cluster_version_t>(raw);
+    }
+    return res;
 }
 
 
@@ -58,14 +63,16 @@ archive_result_t deserialize_for_version(cluster_version_t version,
                                          read_stream_t *s,
                                          T *thing) {
     switch (version) {
-    case cluster_version_t::v1_13:
-        return deserialize<cluster_version_t::v1_13>(s, thing);
-    case cluster_version_t::v1_13_2:
-        return deserialize<cluster_version_t::v1_13_2>(s, thing);
     case cluster_version_t::v1_14:
         return deserialize<cluster_version_t::v1_14>(s, thing);
-    case cluster_version_t::v1_15_is_latest:
-        return deserialize<cluster_version_t::v1_15_is_latest>(s, thing);
+    case cluster_version_t::v1_15:
+        return deserialize<cluster_version_t::v1_15>(s, thing);
+    case cluster_version_t::v1_16:
+        return deserialize<cluster_version_t::v1_16>(s, thing);
+    case cluster_version_t::v2_0:
+        return deserialize<cluster_version_t::v2_0>(s, thing);
+    case cluster_version_t::v2_1_is_latest:
+        return deserialize<cluster_version_t::v2_1_is_latest>(s, thing);
     default:
         unreachable();
     }
@@ -81,14 +88,16 @@ template <class T>
 size_t serialized_size_for_version(cluster_version_t version,
                                    const T &thing) {
     switch (version) {
-    case cluster_version_t::v1_13:
-        return serialized_size<cluster_version_t::v1_13>(thing);
-    case cluster_version_t::v1_13_2:
-        return serialized_size<cluster_version_t::v1_13_2>(thing);
     case cluster_version_t::v1_14:
         return serialized_size<cluster_version_t::v1_14>(thing);
-    case cluster_version_t::v1_15_is_latest:
-        return serialized_size<cluster_version_t::v1_15_is_latest>(thing);
+    case cluster_version_t::v1_15:
+        return serialized_size<cluster_version_t::v1_15>(thing);
+    case cluster_version_t::v1_16:
+        return serialized_size<cluster_version_t::v1_16>(thing);
+    case cluster_version_t::v2_0:
+        return serialized_size<cluster_version_t::v2_0>(thing);
+    case cluster_version_t::v2_1_is_latest:
+        return serialized_size<cluster_version_t::v2_1_is_latest>(thing);
     default:
         unreachable();
     }
@@ -111,77 +120,53 @@ size_t serialized_size_for_version(cluster_version_t version,
     template void serialize<cluster_version_t::CLUSTER>( \
             write_message_t *, const typ &)
 
-#define INSTANTIATE_SERIALIZE_SELF_FOR_DISK(typ)                      \
-    template void typ::rdb_serialize<cluster_version_t::LATEST_DISK>( \
-            write_message_t *) const
-
-#define INSTANTIATE_SERIALIZE_SELF_FOR_CLUSTER(typ)               \
-    template void typ::rdb_serialize<cluster_version_t::CLUSTER>( \
-            write_message_t *) const
+#define INSTANTIATE_DESERIALIZE_FOR_CLUSTER(typ)                       \
+    template archive_result_t deserialize<cluster_version_t::CLUSTER>( \
+                            read_stream_t *, typ *)
 
 #ifdef CLUSTER_AND_DISK_VERSIONS_ARE_SAME
 #define INSTANTIATE_SERIALIZE_FOR_CLUSTER_AND_DISK(typ)  \
     template void serialize<cluster_version_t::CLUSTER>( \
             write_message_t *, const typ &)
-#define INSTANTIATE_SERIALIZE_SELF_FOR_CLUSTER_AND_DISK(typ)          \
-    template void typ::rdb_serialize<cluster_version_t::CLUSTER>(     \
-            write_message_t *) const
 #else
 #define INSTANTIATE_SERIALIZE_FOR_CLUSTER_AND_DISK(typ)      \
     template void serialize<cluster_version_t::CLUSTER>(     \
             write_message_t *, const typ &);                 \
     template void serialize<cluster_version_t::LATEST_DISK>( \
             write_message_t *, const typ &)
-#define INSTANTIATE_SERIALIZE_SELF_FOR_CLUSTER_AND_DISK(typ)          \
-    template void typ::rdb_serialize<cluster_version_t::CLUSTER>(     \
-            write_message_t *) const;                                 \
-    template void typ::rdb_serialize<cluster_version_t::LATEST_DISK>( \
-            write_message_t *) const
 #endif
 
 #define INSTANTIATE_DESERIALIZE_SINCE_v1_13(typ)                                 \
-    template archive_result_t deserialize<cluster_version_t::v1_13>(             \
-            read_stream_t *, typ *);                                             \
-    template archive_result_t deserialize<cluster_version_t::v1_13_2>(           \
-            read_stream_t *, typ *);                                             \
     template archive_result_t deserialize<cluster_version_t::v1_14>(             \
             read_stream_t *, typ *);                                             \
-    template archive_result_t deserialize<cluster_version_t::v1_15_is_latest>(   \
+    template archive_result_t deserialize<cluster_version_t::v1_15>(             \
+            read_stream_t *, typ *);                                             \
+    template archive_result_t deserialize<cluster_version_t::v1_16>(             \
+            read_stream_t *, typ *);                                             \
+    template archive_result_t deserialize<cluster_version_t::v2_0>(              \
+            read_stream_t *, typ *);                                             \
+    template archive_result_t deserialize<cluster_version_t::v2_1_is_latest>(    \
             read_stream_t *, typ *)
-
-#define INSTANTIATE_DESERIALIZE_SELF_SINCE_v1_13(typ)                                     \
-    template archive_result_t typ::rdb_deserialize<cluster_version_t::v1_13>(             \
-            read_stream_t *s);                                                            \
-    template archive_result_t typ::rdb_deserialize<cluster_version_t::v1_13_2>(           \
-            read_stream_t *s);                                                            \
-    template archive_result_t typ::rdb_deserialize<cluster_version_t::v1_14>(             \
-            read_stream_t *s);                                                            \
-    template archive_result_t typ::rdb_deserialize<cluster_version_t::v1_15_is_latest>(   \
-            read_stream_t *s)
-
-#define INSTANTIATE_SERIALIZED_SIZE_SINCE_v1_13(typ)                                  \
-    template size_t serialized_size<cluster_version_t::v1_13>(const typ &)            \
-    template size_t serialized_size<cluster_version_t::v1_13_2>(const typ &)          \
-    template size_t serialized_size<cluster_version_t::v1_14>(const typ &)            \
-    template size_t serialized_size<cluster_version_t::v1_15_is_latest>(const typ &)
 
 #define INSTANTIATE_SERIALIZABLE_SINCE_v1_13(typ)        \
     INSTANTIATE_SERIALIZE_FOR_CLUSTER_AND_DISK(typ);     \
     INSTANTIATE_DESERIALIZE_SINCE_v1_13(typ)
 
-#define INSTANTIATE_SERIALIZABLE_SELF_SINCE_v1_13(typ)    \
-    INSTANTIATE_SERIALIZE_SELF_FOR_CLUSTER_AND_DISK(typ); \
-    INSTANTIATE_DESERIALIZE_SELF_SINCE_v1_13(typ)
+#define INSTANTIATE_DESERIALIZE_SINCE_v1_16(typ)                                 \
+    template archive_result_t deserialize<cluster_version_t::v1_16>(             \
+            read_stream_t *, typ *);                                             \
+    template archive_result_t deserialize<cluster_version_t::v2_0>(              \
+            read_stream_t *, typ *);                                             \
+    template archive_result_t deserialize<cluster_version_t::v2_1_is_latest>(    \
+            read_stream_t *, typ *)
+
+#define INSTANTIATE_SERIALIZABLE_SINCE_v1_16(typ)        \
+    INSTANTIATE_SERIALIZE_FOR_CLUSTER_AND_DISK(typ);     \
+    INSTANTIATE_DESERIALIZE_SINCE_v1_16(typ)
 
 #define INSTANTIATE_SERIALIZABLE_FOR_CLUSTER(typ)                      \
     INSTANTIATE_SERIALIZE_FOR_CLUSTER(typ);                            \
     template archive_result_t deserialize<cluster_version_t::CLUSTER>( \
             read_stream_t *, typ *)
-
-#define INSTANTIATE_SERIALIZABLE_SELF_FOR_CLUSTER(typ)                          \
-    INSTANTIATE_SERIALIZE_SELF_FOR_CLUSTER(typ);                                \
-    template archive_result_t typ::rdb_deserialize<cluster_version_t::CLUSTER>( \
-            read_stream_t *s)
-
 
 #endif  // CONTAINERS_ARCHIVE_VERSIONED_HPP_

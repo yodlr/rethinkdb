@@ -2,10 +2,16 @@
 // Tests for feeds
 /////
 
-var r = require('../../../build/packages/js/rethinkdb');
 var assert = require('assert');
+var path = require('path');
 
-var port = parseInt(process.argv[2], 10);
+// -- load rethinkdb from the proper location
+
+var r = require(path.resolve(__dirname, '..', 'importRethinkDB.js')).r;
+
+// --
+
+var port = parseInt(process.argv[2] || process.env.RDB_DRIVER_PORT, 10);
 var idValue = Math.floor(Math.random()*1000);
 
 var tableName = "floor" + (Math.floor(Math.random()*1000) + 1);
@@ -29,12 +35,12 @@ setTimeout(function() {
 function test1() {
     // Test insert, update, replace, delete and the basic case for `next`
     console.log("Running test1");
-    
-    r.connect({port:port}, function(err, conn) {   
+
+    r.connect({port:port}, function(err, conn) {
         if (err) throw err;
         r.table(tableName).changes().run(conn, function(err, feed) {
             if (err) throw err;
-    
+
             var count = 0;
             var fn = function(err, data) {
                 if (err) {
@@ -48,7 +54,7 @@ function test1() {
                     else {
                         throw err;
                     }
-    
+
                 }
                 else {
                     if (count === 0) {
@@ -76,7 +82,7 @@ function test1() {
             }
             feed.next(fn);
         });
-    
+
         setTimeout(function() { // Wait 5 seconds to retrieve some empty responses
             r.connect({port: port}, function(err, conn) {
                 r.table(tableName).insert({id: idValue, value: 'insert'}).run(conn).then(function() {
@@ -144,7 +150,7 @@ function test2() {
 function test3() {
     // Test that some methods are not available
     console.log("Running test3");
-    
+
     r.connect({port:port}, function(err, conn) {
         if (err) throw err;
 
@@ -183,7 +189,7 @@ function test4() {
             var count = 0;
             feed.on('error', function(err) {
                 if ((count === 3) && (err.message.match(/^Changefeed aborted \(table unavailable/))) {
-                    
+
                     // Test that Cursor's method were deactivated
                     assert.throws(function() {
                         feed.each();

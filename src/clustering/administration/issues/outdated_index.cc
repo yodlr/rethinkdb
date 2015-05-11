@@ -30,74 +30,55 @@ outdated_index_issue_t::outdated_index_issue_t(
     local_issue_t(base_issue_id),
     indexes(_indexes) { }
 
-ql::datum_t outdated_index_issue_t::build_info(const metadata_t &metadata) const {
-    ql::datum_object_builder_t builder;
-    ql::datum_array_builder_t tables(ql::configured_limits_t::unlimited);
-    for (auto const &table : indexes) {
-        namespaces_semilattice_metadata_t::namespace_map_t::const_iterator table_it;
-        databases_semilattice_metadata_t::database_map_t::const_iterator db_it;
-
-        // If we can't find the table, skip it
-        if (!search_const_metadata_by_uuid(&metadata.rdb_namespaces.get()->namespaces,
-                                           table.first, &table_it)) {
+bool outdated_index_issue_t::build_info_and_description(
+        const metadata_t &metadata,
+        UNUSED server_config_client_t *server_config_client,
+        table_meta_client_t *table_meta_client,
+        admin_identifier_format_t identifier_format,
+        ql::datum_t *info_out,
+        datum_string_t *description_out) const {
+    ql::datum_object_builder_t info_builder;
+    ql::datum_array_builder_t tables_builder(ql::configured_limits_t::unlimited);
+    std::string tables_str;
+    for (auto const &pair : indexes) {
+        ql::datum_t table_name_or_uuid;
+        name_string_t table_name;
+        ql::datum_t db_name_or_uuid;
+        name_string_t db_name;
+        if (!convert_table_id_to_datums(pair.first, identifier_format, metadata,
+                table_meta_client, &table_name_or_uuid, &table_name, &db_name_or_uuid,
+                &db_name)) {
+            /* No point in showing an outdated_index issue for a deleted table. */
             continue;
         }
-
-        std::string table_name = table_it->second.get_ref().name.get_ref().str();
-        std::string db_name("__deleted_database__");
-        database_id_t db_id = table_it->second.get_ref().database.get_ref();
-
-        // Get the database name
-        if (search_const_metadata_by_uuid(&metadata.databases.databases,
-                                          table_it->second.get_ref().database.get_ref(),
-                                          &db_it)) {
-            db_name = db_it->second.get_ref().name.get_ref().str();
+        ql::datum_array_builder_t indexes_builder(ql::configured_limits_t::unlimited);
+        std::string indexes_str;
+        for (auto const &index : pair.second) {
+            indexes_builder.add(convert_string_to_datum(index));
+            if (!indexes_str.empty()) {
+                indexes_str += ", ";
+            }
+            indexes_str += "`" + index + "`";
         }
-
-        ql::datum_object_builder_t item;
-        item.overwrite("table", convert_string_to_datum(table_name));
-        item.overwrite("table_id", convert_uuid_to_datum(table.first));
-        item.overwrite("db", convert_string_to_datum(db_name));
-        item.overwrite("db_id", convert_uuid_to_datum(db_id));
-
-        ql::datum_array_builder_t index_list(ql::configured_limits_t::unlimited);
-        for (auto const &index : table.second) {
-            index_list.add(convert_string_to_datum(index));
-        }
-        item.overwrite("indexes", std::move(index_list).to_datum());
-
-        tables.add(std::move(item).to_datum());
+        ql::datum_object_builder_t table_builder;
+        table_builder.overwrite("table", table_name_or_uuid);
+        table_builder.overwrite("db", db_name_or_uuid);
+        table_builder.overwrite("indexes", std::move(indexes_builder).to_datum());
+        tables_builder.add(std::move(table_builder).to_datum());
+        tables_str += strprintf("\nFor table `%s.%s`: %s",
+            table_name.c_str(), db_name.c_str(), indexes_str.c_str());
     }
-    builder.overwrite("tables", std::move(tables).to_datum());
-    return std::move(builder).to_datum();
-}
-
-datum_string_t outdated_index_issue_t::build_description(const ql::datum_t &info) const {
-    std::string index_table;
-    ql::datum_t tables = info.get_field("tables");
-    for (size_t i = 0; i < tables.arr_size(); ++i) {
-        ql::datum_t table_info = tables.get(i);
-        ql::datum_t indexes_ = table_info.get_field("indexes");
-
-        std::string index_str;
-        for (size_t j = 0; j < indexes_.arr_size(); ++j) {
-            index_str += strprintf("%s`%s`",
-                                   j == 0 ? "" : ", ",
-                                   indexes_.get(j).as_str().to_std().c_str());
-        }
-
-        index_table += strprintf("\nFor table %s.%s: %s.",
-                                 table_info.get_field("db").as_str().to_std().c_str(),
-                                 table_info.get_field("table").as_str().to_std().c_str(),
-                                 index_str.c_str());
-    }
-
-    return datum_string_t(strprintf(
+    info_builder.overwrite("tables", std::move(tables_builder).to_datum());
+    *info_out = std::move(info_builder).to_datum();
+    *description_out = datum_string_t(strprintf(
         "The cluster contains indexes that were created with a previous version of the "
         "query language which contained some bugs.  These should be remade to avoid "
         "relying on broken behavior.  See "
         "http://www.rethinkdb.com/docs/troubleshooting/#my-secondary-index-is-outdated "
-        "for details.%s", index_table.c_str()));
+        "for details.%s", tables_str.c_str()));
+    /* If all the tables were deleted by the time we get here, don't show the user an
+    issue */
+    return !tables_str.empty();
 }
 
 class outdated_index_report_impl_t :
@@ -109,7 +90,12 @@ public:
         parent(_parent),
         ns_id(_ns_id) { }
 
-    ~outdated_index_report_impl_t() { }
+    ~outdated_index_report_impl_t() {
+        assert_thread();
+        parent->outdated_indexes.get()->erase(ns_id);
+        parent->remove_report(this);
+        parent->recompute();
+    }
 
     void set_outdated_indexes(std::set<std::string> &&indexes) {
         assert_thread();
@@ -126,22 +112,15 @@ public:
         parent->recompute();
     }
 
-    void index_renamed(const std::string &old_name,
-                       const std::string &new_name) {
+    void indexes_renamed(const std::map<std::string, std::string> &name_changes) {
         assert_thread();
         std::set<std::string> &ns_set = (*parent->outdated_indexes.get())[ns_id];
-
-        if (ns_set.find(old_name) != ns_set.end()) {
-            ns_set.erase(old_name);
-            ns_set.insert(new_name);
+        for (const auto &pair : name_changes) {
+            ns_set.erase(pair.first);
         }
-        parent->recompute();
-    }
-
-    void destroy() {
-        assert_thread();
-        parent->outdated_indexes.get()->erase(ns_id);
-        parent->destroy_report(this);
+        for (const auto &pair : name_changes) {
+            ns_set.insert(pair.second);
+        }
         parent->recompute();
     }
 
@@ -157,16 +136,18 @@ outdated_index_issue_tracker_t::outdated_index_issue_tracker_t(
         local_issue_aggregator_t *parent) :
     issues(std::vector<outdated_index_issue_t>()),
     subs(parent, issues.get_watchable(), &local_issues_t::outdated_index_issues),
-    update_pool(1, &update_queue, this) { }
+    update_pumper(std::bind(&outdated_index_issue_tracker_t::update, this, ph::_1))
+    { }
 
-outdated_index_report_t *outdated_index_issue_tracker_t::create_report(
+scoped_ptr_t<outdated_index_report_t> outdated_index_issue_tracker_t::create_report(
         const namespace_id_t &ns_id) {
-    outdated_index_report_impl_t *new_report = new outdated_index_report_impl_t(this, ns_id);
-    index_reports.get()->insert(new_report);
+    scoped_ptr_t<outdated_index_report_t> new_report(
+        new outdated_index_report_impl_t(this, ns_id));
+    index_reports.get()->insert(new_report.get());
     return new_report;
 }
 
-void outdated_index_issue_tracker_t::destroy_report(outdated_index_report_impl_t *report) {
+void outdated_index_issue_tracker_t::remove_report(outdated_index_report_impl_t *report) {
     guarantee(index_reports.get()->erase(report) == 1);
 }
 
@@ -179,7 +160,7 @@ void copy_thread_map(
 
 void outdated_index_issue_tracker_t::recompute() {
     on_thread_t rethreader((threadnum_t(home_thread())));
-    update_queue.give_value(outdated_index_dummy_value_t());
+    update_pumper.notify();
 }
 
 outdated_index_issue_tracker_t::~outdated_index_issue_tracker_t() {
@@ -190,9 +171,7 @@ outdated_index_issue_tracker_t::~outdated_index_issue_tracker_t() {
         });
 }
 
-void outdated_index_issue_tracker_t::coro_pool_callback(
-        UNUSED outdated_index_dummy_value_t dummy,
-        UNUSED signal_t *interruptor) {
+void outdated_index_issue_tracker_t::update(UNUSED signal_t *interruptor) {
     // Collect outdated indexes by table id from all threads
     std::vector<outdated_index_issue_t::index_map_t> all_maps(get_num_threads());
 
@@ -238,7 +217,7 @@ void outdated_index_issue_tracker_t::combine(
     if (!local_issues->outdated_index_issues.empty()) {
         std::vector<outdated_index_issue_t::index_map_t> all_maps;
         for (auto const &issue : local_issues->outdated_index_issues) {
-            all_maps.push_back(issue.indexes);           
+            all_maps.push_back(issue.indexes);
         }
         issues_out->push_back(scoped_ptr_t<issue_t>(
             new outdated_index_issue_t(merge_maps(all_maps))));

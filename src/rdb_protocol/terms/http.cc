@@ -15,20 +15,20 @@ namespace ql {
 
 class http_term_t : public op_term_t {
 public:
-    http_term_t(compile_env_t *env, const protob_t<const Term> &term) :
-        op_term_t(env, term, argspec_t(1),
-                  optargspec_t({"data",
-                                "timeout",
-                                "method",
-                                "params",
-                                "header",
-                                "attempts",
-                                "redirects",
-                                "verify",
-                                "page",
-                                "page_limit",
-                                "auth",
-                                "result_format" }))
+    http_term_t(compile_env_t *env, const protob_t<const Term> &term)
+        : op_term_t(env, term, argspec_t(1),
+                    optargspec_t({"data",
+                                  "timeout",
+                                  "method",
+                                  "params",
+                                  "header",
+                                  "attempts",
+                                  "redirects",
+                                  "verify",
+                                  "page",
+                                  "page_limit",
+                                  "auth",
+                                  "result_format" }))
     { }
 private:
     virtual const char *name() const { return "http"; }
@@ -94,23 +94,23 @@ private:
 
     // Helper functions, used in optarg parsing
     static void verify_header_string(const std::string &str,
-                                     const pb_rcheckable_t *header);
+                                     const bt_rcheckable_t *header);
 
     static std::string print_http_param(const datum_t &datum,
                                         const char *val_name,
                                         const char *key_name,
-                                        const pb_rcheckable_t *val);
+                                        const bt_rcheckable_t *val);
 
     static std::string get_auth_item(const datum_t &datum,
                                      const std::string &name,
-                                     const pb_rcheckable_t *auth);
+                                     const bt_rcheckable_t *auth);
 
     // Have a maximum timeout of 30 days
     static const uint64_t MAX_TIMEOUT_MS = 2592000000ull;
 };
 
 void check_url_params(const datum_t &params,
-                      pb_rcheckable_t *val) {
+                      bt_rcheckable_t *val) {
     if (params.get_type() == datum_t::R_OBJECT) {
         for (size_t i = 0; i < params.obj_size(); ++i) {
             auto pair = params.get_pair(i);
@@ -138,18 +138,22 @@ public:
     http_datum_stream_t(http_opts_t &&_opts,
                         counted_t<const func_t> &&_depaginate_fn,
                         int64_t _depaginate_limit,
-                        const protob_t<const Backtrace> &bt) :
+                        backtrace_id_t bt) :
         eager_datum_stream_t(bt),
         opts(std::move(_opts)),
         depaginate_fn(_depaginate_fn),
         depaginate_limit(_depaginate_limit),
         more(depaginate_limit != 0) { }
 
-    bool is_array() { return false; }
+    bool is_array() const { return false; }
     bool is_exhausted() const { return !more && batch_cache_exhausted(); }
-    bool is_cfeed() const { return false; }
+    feed_type_t cfeed_type() const { return feed_type_t::not_feed; }
+    bool is_infinite() const { return false; }
 
 private:
+    virtual std::vector<changefeed::keyspec_t> get_change_specs() {
+        rfail(base_exc_t::GENERIC, "%s", "Cannot call `changes` on an HTTP stream.");
+    }
     std::vector<datum_t> next_page(env_t *env);
     std::vector<datum_t> next_raw_batch(env_t *env, const batchspec_t &batchspec);
 
@@ -170,7 +174,7 @@ private:
 
 void check_error_result(const http_result_t &res,
                         const http_opts_t &opts,
-                        const pb_rcheckable_t *parent) {
+                        const bt_rcheckable_t *parent) {
     if (!res.error.empty()) {
         std::string error_string = strprintf("Error in HTTP %s of `%s`: %s.",
                                              http_method_to_str(opts.method).c_str(),
@@ -187,8 +191,12 @@ void check_error_result(const http_result_t &res,
         // Any error coming back from the extproc may be due to the fragility of
         // interfacing with external servers.  Provide a non-existence error so that
         // users may call `r.default` for more robustness.
-        rfail_target(parent, base_exc_t::NON_EXISTENCE,
-                     "%s", error_string.c_str());
+        if (parent == nullptr) {
+            rfail_toplevel(base_exc_t::NON_EXISTENCE, "%s", error_string.c_str());
+        } else {
+            rfail_target(parent, base_exc_t::NON_EXISTENCE,
+                         "%s", error_string.c_str());
+        }
     }
 }
 
@@ -196,7 +204,7 @@ void dispatch_http(env_t *env,
                    const http_opts_t &opts,
                    http_runner_t *runner,
                    http_result_t *res_out,
-                   const pb_rcheckable_t *parent) {
+                   const bt_rcheckable_t *parent) {
     try {
         runner->http(opts, res_out, env->interruptor);
     } catch (const extproc_worker_exc_t &ex) {
@@ -216,6 +224,7 @@ scoped_ptr_t<val_t> http_term_t::eval_impl(scope_env_t *env, args_t *args,
                                            eval_flags_t) const {
     http_opts_t opts;
     opts.limits = env->env->limits();
+    opts.version = env->env->reql_version();
     opts.url.assign(args->arg(env, 0)->as_str().to_std());
     opts.proxy.assign(env->env->get_reql_http_proxy());
     get_optargs(env, args, &opts);
@@ -304,6 +313,9 @@ bool http_datum_stream_t::apply_depaginate(env_t *env, const http_result_t &res)
     rassert(opts.url_params.has());
     rassert(res.header.has());
     rassert(res.body.has());
+
+    // Carry over the cookies from the previous request
+    opts.cookies = std::move(res.cookies);
 
     datum_t empty
         = datum_t(std::map<datum_string_t, datum_t>());
@@ -452,7 +464,7 @@ void http_term_t::get_timeout_ms(scope_env_t *env,
 
 // Don't allow header strings to include newlines
 void http_term_t::verify_header_string(const std::string &str,
-                                       const pb_rcheckable_t *header) {
+                                       const bt_rcheckable_t *header) {
     if (str.find_first_of("\r\n") != std::string::npos) {
         rfail_target(header, base_exc_t::GENERIC,
                      "A `header` item contains newline characters.");
@@ -538,7 +550,7 @@ void http_term_t::get_method(scope_env_t *env,
 
 std::string http_term_t::get_auth_item(const datum_t &datum,
                                        const std::string &name,
-                                       const pb_rcheckable_t *auth) {
+                                       const bt_rcheckable_t *auth) {
     datum_t item = datum.get_field(datum_string_t(name), NOTHROW);
     if (!item.has()) {
         rfail_target(auth, base_exc_t::GENERIC,
@@ -602,7 +614,7 @@ void http_term_t::get_auth(scope_env_t *env,
 std::string http_term_t::print_http_param(const datum_t &datum,
                                           const char *val_name,
                                           const char *key_name,
-                                          const pb_rcheckable_t *val) {
+                                          const bt_rcheckable_t *val) {
     if (datum.get_type() == datum_t::R_NUM) {
         return strprintf("%" PR_RECONSTRUCTABLE_DOUBLE,
                          datum.as_num());
@@ -760,7 +772,8 @@ void http_term_t::get_bool_optarg(const std::string &optarg_name,
     }
 }
 
-counted_t<term_t> make_http_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_http_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<http_term_t>(env, term);
 }
 

@@ -8,7 +8,6 @@
 
 #include "clustering/administration/issues/issue.hpp"
 #include "clustering/administration/metadata.hpp"
-#include "http/json.hpp"
 #include "rpc/semilattice/view.hpp"
 
 // Base issue for all name collisions (server, database, and table)
@@ -29,15 +28,19 @@ class server_name_collision_issue_t : public name_collision_issue_t {
 public:
     explicit server_name_collision_issue_t(
         const name_string_t &_name,
-        const std::vector<machine_id_t> &_collided_ids);
+        const std::vector<server_id_t> &_collided_ids);
     const datum_string_t &get_name() const { return server_name_collision_issue_type; }
 
 private:
-    ql::datum_t build_info(const metadata_t &metadata) const;
-    datum_string_t build_description(const ql::datum_t &info) const;
-
     static const datum_string_t server_name_collision_issue_type;
     static const issue_id_t base_issue_id;
+    bool build_info_and_description(
+        const metadata_t &metadata,
+        server_config_client_t *server_config_client,
+        table_meta_client_t *table_meta_client,
+        admin_identifier_format_t identifier_format,
+        ql::datum_t *info_out,
+        datum_string_t *description_out) const;
 };
 
 // Issue for database name collisions
@@ -45,15 +48,19 @@ class db_name_collision_issue_t : public name_collision_issue_t {
 public:
     explicit db_name_collision_issue_t(
         const name_string_t &_name,
-        const std::vector<machine_id_t> &_collided_ids);
+        const std::vector<server_id_t> &_collided_ids);
     const datum_string_t &get_name() const { return db_name_collision_issue_type; }
 
 private:
-    ql::datum_t build_info(const metadata_t &metadata) const;
-    datum_string_t build_description(const ql::datum_t &info) const;
-
     static const datum_string_t db_name_collision_issue_type;
     static const issue_id_t base_issue_id;
+    bool build_info_and_description(
+        const metadata_t &metadata,
+        server_config_client_t *server_config_client,
+        table_meta_client_t *table_meta_client,
+        admin_identifier_format_t identifier_format,
+        ql::datum_t *info_out,
+        datum_string_t *description_out) const;
 };
 
 // Issue for table name collisions
@@ -62,23 +69,28 @@ public:
     table_name_collision_issue_t(
         const name_string_t &_name,
         const database_id_t &_db_id,
-        const std::vector<machine_id_t> &_collided_ids);
+        const std::vector<server_id_t> &_collided_ids);
     const datum_string_t &get_name() const { return table_name_collision_issue_type; }
 
 private:
-    ql::datum_t build_info(const metadata_t &metadata) const;
-    datum_string_t build_description(const ql::datum_t &info) const;
-
     static const datum_string_t table_name_collision_issue_type;
     static const issue_id_t base_issue_id;
     const database_id_t db_id;
+    bool build_info_and_description(
+        const metadata_t &metadata,
+        server_config_client_t *server_config_client,
+        table_meta_client_t *table_meta_client,
+        admin_identifier_format_t identifier_format,
+        ql::datum_t *info_out,
+        datum_string_t *description_out) const;
 };
 
 class name_collision_issue_tracker_t : public issue_tracker_t {
 public:
     name_collision_issue_tracker_t(
         boost::shared_ptr<semilattice_read_view_t<cluster_semilattice_metadata_t> >
-            _cluster_sl_view);
+            _cluster_sl_view,
+        table_meta_client_t *_table_meta_client);
 
     ~name_collision_issue_tracker_t();
 
@@ -87,6 +99,7 @@ public:
 private:
     boost::shared_ptr<semilattice_read_view_t<cluster_semilattice_metadata_t> >
         cluster_sl_view;
+    table_meta_client_t *table_meta_client;
 
     DISABLE_COPYING(name_collision_issue_tracker_t);
 };

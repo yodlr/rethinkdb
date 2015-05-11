@@ -7,6 +7,7 @@
 #include "btree/keys.hpp"
 #include "btree/leaf_node.hpp"
 #include "concurrency/interruptor.hpp"
+#include "concurrency/signal.hpp"
 #include "containers/scoped.hpp"
 #include "rdb_protocol/geo/exceptions.hpp"
 #include "rdb_protocol/geo/geojson.hpp"
@@ -67,14 +68,20 @@ std::string s2cellid_to_key(S2CellId id) {
 }
 
 S2CellId key_to_s2cellid(const std::string &sid) {
-    guarantee(sid.length() >= 2 && sid[0] == 'G' && sid[1] == 'C');
+    guarantee(sid.length() >= 2
+              // We need the static cast here because `'G' | 0x80` does integer
+              // promotion and produces 199, whereas `sid[0]` produces -57
+              // because it's a signed char.  C FTW!
+              && (sid[0] == 'G' || static_cast<uint8_t>(sid[0]) == ('G' | 0x80))
+              && sid[1] == 'C');
     return S2CellId::FromToken(sid.substr(2));
 }
 
 S2CellId btree_key_to_s2cellid(const btree_key_t *key) {
     rassert(key != NULL);
-    return key_to_s2cellid(datum_t::extract_secondary(
-        std::string(reinterpret_cast<const char *>(key->contents), key->size)));
+    return key_to_s2cellid(
+        datum_t::extract_secondary(
+            std::string(reinterpret_cast<const char *>(key->contents), key->size)));
 }
 
 std::vector<std::string> compute_index_grid_keys(
@@ -82,7 +89,8 @@ std::vector<std::string> compute_index_grid_keys(
     rassert(key.has());
 
     if (!key.is_ptype(ql::pseudo::geometry_string)) {
-        throw geo_exception_t("Expected geometry but found " + key.get_type_name() + ".");
+        throw geo_exception_t(
+            "Expected geometry but found " + key.get_type_name() + ".");
     }
     if (goal_cells <= 0) {
         throw geo_exception_t("goal_cells must be positive (and should be >= 4).");
@@ -123,9 +131,10 @@ void geo_index_traversal_helper_t::init_query(
     is_initialized_ = true;
 }
 
-done_traversing_t
-geo_index_traversal_helper_t::handle_pair(scoped_key_value_t &&keyvalue,
-                                          concurrent_traversal_fifo_enforcer_signal_t waiter)
+continue_bool_t
+geo_index_traversal_helper_t::handle_pair(
+    scoped_key_value_t &&keyvalue,
+    concurrent_traversal_fifo_enforcer_signal_t waiter)
         THROWS_ONLY(interrupted_exc_t) {
     guarantee(is_initialized_);
 
@@ -137,30 +146,40 @@ geo_index_traversal_helper_t::handle_pair(scoped_key_value_t &&keyvalue,
     if (any_query_cell_intersects(key_cell.range_min(), key_cell.range_max())) {
         return on_candidate(std::move(keyvalue), waiter);
     } else {
-        return done_traversing_t::NO;
+        return continue_bool_t::CONTINUE;
     }
 }
 
-bool geo_index_traversal_helper_t::is_range_interesting(
+void geo_index_traversal_helper_t::filter_range(
         const btree_key_t *left_excl_or_null,
-        const btree_key_t *right_incl_or_null) {
+        const btree_key_t *right_incl,
+        bool *skip_out) {
     guarantee(is_initialized_);
     // We ignore the fact that the left key is exclusive and not inclusive.
     // In rare cases this costs us a little bit of efficiency because we consider
     // one extra key, but it saves us some complexity.
-    return any_query_cell_intersects(left_excl_or_null, right_incl_or_null);
+    *skip_out = !any_query_cell_intersects(left_excl_or_null, right_incl);
 }
 
 bool geo_index_traversal_helper_t::any_query_cell_intersects(
-        const btree_key_t *left_incl_or_null, const btree_key_t *right_incl_or_null) {
+        const btree_key_t *left_incl_or_null, const btree_key_t *right_incl) {
+    /* This is a bit fragile in that we assume `left_incl_or_null` and `right_incl` are
+    valid complete secondary index keys (or that `right_incl` is the max possible B-tree
+    key). If we were to change the B-tree logic so that it truncated B-tree internal node
+    keys, then this code would break. */
+
     S2CellId left_cell =
         left_incl_or_null == NULL
         ? S2CellId::FromFacePosLevel(0, 0, 0) // The smallest valid cell id
         : btree_key_to_s2cellid(left_incl_or_null);
-    S2CellId right_cell =
-        right_incl_or_null == NULL
-        ? S2CellId::FromFacePosLevel(5, 0, 0) // The largest valid cell id
-        : btree_key_to_s2cellid(right_incl_or_null);
+
+    S2CellId right_cell;
+    store_key_t max_btree_key = store_key_t::max();
+    if (btree_key_cmp(right_incl, max_btree_key.btree_key()) == 0) {
+        right_cell = S2CellId::FromFacePosLevel(5, 0, 0);
+    } else {
+        right_cell = btree_key_to_s2cellid(right_incl);
+    }
 
     // Determine a S2CellId range that is a superset of what's intersecting
     // with anything stored in [left_cell, right_cell].

@@ -135,12 +135,20 @@ bool disk_format_version_is_recognized(uint32_t disk_format_version) {
     // the current metablock's version number more closely.  If you have a new
     // cluster_version_t value and such changes have not happened, it is correct to
     // add the new cluster_version_t value to this list of recognized ones.
-    return disk_format_version
-            == static_cast<uint32_t>(cluster_version_t::v1_13)
+    if (disk_format_version
+        == static_cast<uint32_t>(obsolete_cluster_version_t::v1_13)) {
+        fail_due_to_user_error(
+            "Data directory is from version 1.13 of RethinkDB, "
+            "which is no longer supported.  "
+            "You can migrate by launching RethinkDB 2.0 with this data directory "
+            "and rebuilding your secondary indexes.");
+    }
+    return disk_format_version == static_cast<uint32_t>(cluster_version_t::v1_14)
+        || disk_format_version == static_cast<uint32_t>(cluster_version_t::v1_15)
+        || disk_format_version == static_cast<uint32_t>(cluster_version_t::v1_16)
+        || disk_format_version == static_cast<uint32_t>(cluster_version_t::v2_0)
         || disk_format_version
-            == static_cast<uint32_t>(cluster_version_t::v1_14)
-        || disk_format_version
-            == static_cast<uint32_t>(cluster_version_t::v1_15_is_latest_disk);
+            == static_cast<uint32_t>(cluster_version_t::v2_1_is_latest);
 }
 
 
@@ -188,6 +196,7 @@ void metablock_manager_t<metablock_t>::co_start_existing(file_t *file, bool *mb_
                            DEFAULT_DISK_ACCOUNT, &callback);
     }
     callback.wait();
+    extent_manager->stats->bytes_read(METABLOCK_SIZE * metablock_offsets.size());
 
     // TODO: we can parallelize this code even further by doing crc
     // checks as soon as a block is ready, as opposed to waiting for
@@ -284,6 +293,7 @@ void metablock_manager_t<metablock_t>::co_write_metablock(metablock_t *mb, file_
 
     state = state_ready;
     mb_buffer_in_use = false;
+    extent_manager->stats->bytes_written(METABLOCK_SIZE);
 }
 
 template<class metablock_t>

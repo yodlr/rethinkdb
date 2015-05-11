@@ -29,9 +29,9 @@ public:
                const argspec_t &argspec, optargspec_t optargspec = optargspec_t({}))
         : op_term_t(env, term, argspec, optargspec) { }
 private:
-    // All geo terms are non-deterministic, because they typically depend on
-    // floating point results that might diverge between machines / compilers /
-    // libraries.
+    // With the exception of r.point(), all geo terms are non-deterministic
+    // because they typically depend on floating point results that might
+    // diverge between machines / compilers / libraries.
     // Even seemingly harmless things such as r.line() are affected because they
     // perform geometric validation.
     bool is_deterministic() const { return false; }
@@ -51,7 +51,8 @@ class geo_obj_or_seq_op_term_t : public obj_or_seq_op_term_t {
 public:
     geo_obj_or_seq_op_term_t(compile_env_t *env, protob_t<const Term> term,
                              poly_type_t _poly_type, argspec_t argspec)
-        : obj_or_seq_op_term_t(env, term, _poly_type, argspec, std::set<std::string>{"GEOMETRY"}) { }
+        : obj_or_seq_op_term_t(env, term, _poly_type, argspec,
+                               std::set<std::string>{"GEOMETRY"}) { }
 private:
     // See comment in geo_term_t about non-determinism
     bool is_deterministic() const { return false; }
@@ -115,6 +116,15 @@ public:
     point_term_t(compile_env_t *env, const protob_t<const Term> &term)
         : geo_term_t(env, term, argspec_t(2)) { }
 private:
+    // point_term_t is deterministic because it doesn't perform any complex
+    // arithmetics. It only checks the range of the values as part of
+    // `validate_geojson()`.
+    // Note that this is *only* true because S2 doesn't perform any additional
+    // checks on the S2Point constructed in validate_geojson(). The construction
+    // of the S2Point itself depends on the M_PI constant which could be system
+    // dependent. Therefore if anything in validate_geojson() starts using
+    // the constructed S2Point some day, determinism will need to be reconsidered.
+    bool is_deterministic() const { return true; }
     scoped_ptr_t<val_t> eval_geo(scope_env_t *env, args_t *args, eval_flags_t) const {
         double lon = args->arg(env, 0)->as_num();
         double lat = args->arg(env, 1)->as_num();
@@ -360,15 +370,15 @@ private:
         counted_t<table_t> table = args->arg(env, 0)->as_table();
         scoped_ptr_t<val_t> query_arg = args->arg(env, 1);
         scoped_ptr_t<val_t> index = args->optarg(env, "index");
-        if (!index.has()) {
-            rfail(base_exc_t::GENERIC, "get_intersecting requires an index argument.");
-        }
+        rcheck(index.has(), base_exc_t::GENERIC,
+               "get_intersecting requires an index argument.");
         std::string index_str = index->as_str().to_std();
-
+        rcheck(index_str != table->get_pkey(), base_exc_t::GENERIC,
+               "get_intersecting cannot use the primary index.");
         counted_t<datum_stream_t> stream = table->get_intersecting(
             env->env, query_arg->as_ptype(pseudo::geometry_string), index_str,
             this);
-        return new_val(stream, table);
+        return new_val(make_counted<selection_t>(table, stream));
     }
     virtual const char *name() const { return "get_intersecting"; }
 };
@@ -401,10 +411,11 @@ private:
         counted_t<table_t> table = args->arg(env, 0)->as_table();
         scoped_ptr_t<val_t> center_arg = args->arg(env, 1);
         scoped_ptr_t<val_t> index = args->optarg(env, "index");
-        if (!index.has()) {
-            rfail(base_exc_t::GENERIC, "get_nearest requires an index argument.");
-        }
+        rcheck(index.has(), base_exc_t::GENERIC,
+               "get_nearest requires an index argument.");
         std::string index_str = index->as_str().to_std();
+        rcheck(index_str != table->get_pkey(), base_exc_t::GENERIC,
+               "get_nearest cannot use the primary index.");
         lon_lat_point_t center = parse_point_argument(center_arg->as_datum());
         ellipsoid_spec_t reference_ellipsoid = pick_reference_ellipsoid(env, args);
         dist_unit_t dist_unit = pick_dist_unit(env, args);
@@ -430,7 +441,7 @@ private:
 
         datum_t results = table->get_nearest(
                 env->env, center, max_dist, max_results, reference_ellipsoid,
-                dist_unit, index_str, this, env->env->limits());
+                dist_unit, index_str, env->env->limits());
         return new_val(results);
     }
     virtual const char *name() const { return "get_nearest"; }
@@ -491,43 +502,56 @@ private:
 };
 
 
-counted_t<term_t> make_geojson_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_geojson_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<geojson_term_t>(env, term);
 }
-counted_t<term_t> make_to_geojson_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_to_geojson_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<to_geojson_term_t>(env, term);
 }
-counted_t<term_t> make_point_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_point_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<point_term_t>(env, term);
 }
-counted_t<term_t> make_line_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_line_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<line_term_t>(env, term);
 }
-counted_t<term_t> make_polygon_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_polygon_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<polygon_term_t>(env, term);
 }
-counted_t<term_t> make_intersects_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_intersects_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<intersects_term_t>(env, term);
 }
-counted_t<term_t> make_includes_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_includes_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<includes_term_t>(env, term);
 }
-counted_t<term_t> make_distance_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_distance_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<distance_term_t>(env, term);
 }
-counted_t<term_t> make_circle_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_circle_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<circle_term_t>(env, term);
 }
-counted_t<term_t> make_get_intersecting_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_get_intersecting_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<get_intersecting_term_t>(env, term);
 }
-counted_t<term_t> make_fill_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_fill_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<fill_term_t>(env, term);
 }
-counted_t<term_t> make_get_nearest_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_get_nearest_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<get_nearest_term_t>(env, term);
 }
-counted_t<term_t> make_polygon_sub_term(compile_env_t *env, const protob_t<const Term> &term) {
+counted_t<term_t> make_polygon_sub_term(
+        compile_env_t *env, const protob_t<const Term> &term) {
     return make_counted<polygon_sub_term_t>(env, term);
 }
 

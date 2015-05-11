@@ -20,22 +20,24 @@ init () {
     min_browserify_version=3.0.0
     max_browserify_version=3.24.13
     min_python_version=2.6.0
-    max_python_version=2.9.99
 
-    must_fetch_list='bluebird'
+    must_fetch_list='bluebird v8'
     please_fetch_list="handlebars gtest re2 $must_fetch_list"
 
     optional_libs="gtest termcap boost_system ssl"
-    required_libs="protobuf v8 re2 z crypto curl"
-    other_libs="unwind tcmalloc_minimal"
+    required_libs="protobuf icui18n icuuc icudata v8 re2 z crypto curl"
+    other_libs="unwind tcmalloc jemalloc"
     all_libs="$required_libs $optional_libs $other_libs"
-    default_static="tcmalloc_minimal"
+    default_static="tcmalloc jemalloc"
 
-    web_assets_deps="npm lessc coffee handlebars browserify bluebird"
+    web_assets_deps="npm coffee browserify bluebird"
     required_bin_deps="protoc python"
     optional_bin_deps="wget curl"
     bin_deps="cxx $web_assets_deps $required_bin_deps $optional_bin_deps"
     all_deps="$bin_deps $all_libs boost"
+
+    default_allocator_linux=jemalloc
+    default_allocator_osx=system
 
     allowed_arg_vars="CXXFLAGS LDFLAGS"
 }
@@ -66,11 +68,12 @@ configure () {
     case "${MACHINE#*-}" in
         *apple-darwin*)
             var OS "Darwin"
-            with_tcmalloc=false ;
+            default_allocator=$default_allocator_osx
             var PTHREAD_LIBS "" ;
             var RT_LIBS "" ;;
         *linux*)
             var OS "Linux"
+            default_allocator=$default_allocator_linux
             var PTHREAD_LIBS -pthread ;
             var RT_LIBS -lrt ;;
         *) error "unsupported operating system: $MACHINE" ;;
@@ -81,8 +84,6 @@ configure () {
         *) error "unsopported architecture: $MACHINE"
     esac
     var M_LIBS -lm
-    require "Without tcmalloc"
-    boolvar NO_TCMALLOC not $with_tcmalloc
     require "Build Architecture"
     var GCC_ARCH $(uname -m | grep '^[A-Za-z0-9_]*$' | head -n 1)
     var GCC_ARCH_REDUCED $(echo "$GCC_ARCH" | sed -e 's/^i[56]86$$/i486/g')
@@ -104,6 +105,7 @@ configure () {
         fi
     fi
     boolvar USE_PRECOMPILED_WEB_ASSETS $enable_precompiled_web
+    check_admin_deps
     for bin in $required_bin_deps; do
         require_dep $bin
         check_bin $bin
@@ -128,12 +130,21 @@ configure () {
         check_lib $lib require
     done
     check_v8_pre_3_19
-    if [[ $NO_TCMALLOC = 0 ]] ; then
-        check_lib tcmalloc_minimal require
+
+    require malloc
+    var ALLOCATOR "${custom_allocator:-$default_allocator}"
+    var DEFAULT_ALLOCATOR "$default_allocator"
+    if [[ "$ALLOCATOR" = system ]]; then
+        var MALLOC_LIBS ""
+        var MALLOC_LIBS_DEP ""
+        boolvar STATIC_MALLOC false
     else
-        var TCMALLOC_MINIMAL_LIBS ""
-        empty_deps_lib tcmalloc_minimal false
+        check_lib "$ALLOCATOR" require
+        boolvar STATIC_MALLOC contains "$static_libs" "$ALLOCATOR"
+        macro MALLOC_LIBS     "\$($(uc $ALLOCATOR)_LIBS)"
+        macro MALLOC_LIBS_DEP "\$($(uc $ALLOCATOR)_LIBS_DEP)"
     fi
+
     test_protobuf
     check_boost
     boolvar STATIC_V8 contains "$static_libs" v8
@@ -213,7 +224,7 @@ read_args () {
     arg_prefix=
     arg_sysconfdir=
     arg_localstatedir=
-    with_tcmalloc=true
+    custom_allocator=
     enable_precompiled_web=
     use_ccache=false
 
@@ -267,8 +278,9 @@ read_args () {
                     die "Unknown library: $arg"
                 fi ;;
             --lib-path) $has_arg; lib_paths="$lib_paths $arg" ;;
-            --with-tcmalloc) $no_arg; with_tcmalloc=true ;;
-            --without-tcmalloc) $no_arg; with_tcmalloc=false ;;
+            --with-tcmalloc) $no_arg; set_custom_allocator tcmalloc ;;
+            --with-jemalloc) $no_arg; set_custom_allocator jemalloc ;;
+            --with-system-malloc) $no_arg; set_custom_allocator system ;;
             --enable-precompiled-web) $no_arg; enable_precompiled_web=true ;;
             --disable-precompiled-web) $no_arg; enable_precompiled_web=false ;;
             --ccache) $no_arg; use_ccache=true ;;
@@ -290,16 +302,19 @@ read_args () {
     done
 }
 
+set_custom_allocator () {
+    if [[ -n "$custom_allocator" ]]; then
+        die "incompatible options: --with-$custom_allocator and --with-$1"
+    fi
+    custom_allocator=$1
+}
+
 # Description of some of the dependencies
 dep_descrs=':
 cxx:C++ Compiler
 protoc:Protobuf compiler
 npm:Node.js package manager
-lessc:LESS css
-coffee:CoffeeScript
-handlebars:Handlebars
 unwind:libunwind
-tcmalloc_minimal:Google Perf Tools library
 v8:v8 javascript engine
 protobuf:Protobuf library
 browserify:Browserify
@@ -339,12 +354,11 @@ EOF
   --prefix <dir>          Installation prefix. Defaults to /usr/local
   --sysconfdir <dir>      Configuration prefix. Defaults to /usr/local/etc
   --localstatedir <dir>   Runtime data prefix. Defaults to /usr/local/var
-  --with-<module>
-  --without-<module>      Enable or disable <module>. <module> can be one of
-                            tcmalloc     Build with tcmalloc. (Default: enabled)
-  --enable-<option>
-  --disable-<option>      Enable or disable a build option
-                            precompiled-web  Use precompiled web assets located in precompiled/web (default: autodetect)
+  --with-tcmalloc         Use TCMalloc
+  --with-jemalloc         Use jemalloc (default on Linux)
+  --with-system-malloc    Use the system malloc (default on OS X)
+  --enable-precompiled-web
+  --disable-precompiled-web Use precompiled web assets located in precompiled/web (default: autodetect)
   --ccache                Speed up the build using ccache
 EOF
 }
@@ -432,6 +446,7 @@ show_descr () {
     error_details=
 }
 
+# show_no [package_descr] [package_name]
 # Like 'show no', but show the delayed error if there is one
 show_no () {
     local req=$required
@@ -439,8 +454,8 @@ show_no () {
     local info=""
     show no
     if $req; then
-        if can_fetch "$(guess_pkg_name "${1:-}")"; then
-            info=" Try running ./configure with the --fetch ${1:-} or --allow-fetch flags."
+        if can_fetch "$(guess_pkg_name "${2:-$1}")"; then
+            info=" Try running ./configure with the --fetch ${2:-$1} or --allow-fetch flags."
         fi
         error "${err:-${1:-} not found.$info}"
     elif [[ -n "$delayed_error" ]]; then
@@ -528,7 +543,7 @@ check_cxx () {
             error "unable to run $force_CXX"
             return
         fi
-        CXX=$(which c++ 2>/dev/null || which g++ 2>/dev/null || which clang 2>/dev/null || which icc 2>/dev/null)
+        CXX=$(command -v c++ 2>/dev/null || command -v g++ 2>/dev/null || command -v clang 2>/dev/null || command -v icc 2>/dev/null)
         if [[ -z "$CXX" ]]; then
             not_found CXX
             return
@@ -703,7 +718,7 @@ check_bin () {
     fi
     local ucbin=$(uc $1)
     local bin=${force_bin:-${!ucbin:-$1}}
-    bin=$(which "$bin" 2>/dev/null)
+    bin=$(command -v "$bin" 2>/dev/null)
     if [[ ! -x "$bin" ]]; then
         if [[ -n "${force_bin:-}" ]]; then
             bin=$force_bin
@@ -722,7 +737,7 @@ check_bin () {
             fetch_bin $1
             return
         else
-            show_no
+            show_no "$1"
             return
         fi
     fi
@@ -784,6 +799,7 @@ fetch_lib () {
     macro "$(uc "$1")_LIBS_DEP"         "\$(SUPPORT_BUILD_DIR)/${pkg}_$version/lib/lib$1.a"
     macro "$(uc "$1")_INCLUDE" "-isystem \$(SUPPORT_BUILD_DIR)/${pkg}_$version/include"
     macro "$(uc "$1")_INCLUDE_DEP"      "\$(SUPPORT_BUILD_DIR)/${pkg}_$version/include"
+    static_libs="$static_libs $1"
 }
 
 # require_dep <name>
@@ -830,15 +846,25 @@ int main() {
     m.insert(std::make_pair(0, C()));
 }
 
+~jemalloc:
+
+#include <jemalloc/jemalloc.h>
+
+int main(){
+    static_assert(JEMALLOC_VERSION_MAJOR >= 3, "jemalloc version 3 or above is required");
+}
+
 ~'
 
 # An assoc-list of possible library aliases
-lib_alias=':~termcap:tinfo ncurses'
+lib_alias=':
+termcap:termcap tinfo ncurses
+tcmalloc:tcmalloc_minimal'
 
 # List the paths where static libraries can be found into the try_lib_paths variable
 build_try_lib_paths () {
     cc_paths=$($CXX -print-search-dirs 2>/dev/null | grep ^libraries | sed -e 's/^libraries[: =]*//; s/:/ /g')
-    LDCONFIG=$(PATH="$PATH:/sbin:/usr/sbin" which ldconfig 2>/dev/null)
+    LDCONFIG=$(PATH="$PATH:/sbin:/usr/sbin" command -v ldconfig 2>/dev/null)
     if [[ -n "$LDCONFIG" ]]; then
         ld_paths=$($LDCONFIG -v -N -X 2>/dev/null | grep -v '^	' | sed -e 's/:$//' )
     else
@@ -866,7 +892,7 @@ check_lib () {
         ${info}_dep $1
         check_lib_compile "$path" $1
         if $can_show; then
-            show_no "$path"
+            show_no "$path" "$1"
             empty_deps_lib $1 false
         fi
         return
@@ -882,8 +908,8 @@ check_lib () {
     $info "$1$static_info"
     delay_errors=true
     local aliases
-    lookup "$lib_alias" $1 aliases || aliases=
-    for lib in $1 $aliases; do
+    lookup "$lib_alias" $1 aliases || aliases=$1
+    for lib in $aliases; do
         $check $lib $1
         if ! $can_show; then
             empty_deps_lib $1 true
@@ -893,7 +919,7 @@ check_lib () {
     if fetch_allowed $(lib_pkg_name $1); then
         fetch_lib $1
     else
-        show_no "lib$1$static_info"
+        show_no "lib$1$static_info" "$1"
         empty_deps_lib $1 false
     fi
 }
@@ -949,13 +975,20 @@ check_cross_compiling () {
 }
 
 check_static_lib () {
+    local found=false
     for path in $try_lib_paths; do
         local l=$path/lib$1.a
-        check_lib_compile "$l" "$2"
-        if ! $can_show; then
-            return 0
+        if test -e "$l"; then
+            found=true
+            check_lib_compile "$l" "$2"
+            if ! $can_show; then
+                return 0
+            fi
         fi
     done
+    if ! $found; then
+        error_details="${error_details:-}"$"lib$1.a not found\n"
+    fi
 }
 
 # Some utility functions
@@ -1075,7 +1108,6 @@ check_boost () {
 bin_pkg_name () {
     case "$1" in
         protoc) echo protobuf ;;
-        lessc) echo less ;;
         coffee) echo coffee-script ;;
         npm) echo node ;;
         # The curl-bin package doesn't exist. It is placed here to avoid
@@ -1089,12 +1121,14 @@ bin_pkg_name () {
 # The support package name that contains the library
 lib_pkg_name () {
     case "$1" in
-        tcmalloc_minimal) echo gperftools ;;
         tcmalloc) echo gperftools ;;
         z) echo zlib ;;
         boost_system) echo boost ;;
         crypto) echo openssl ;;
         ssl) echo openssl ;;
+        icui18n) echo icu ;;
+        icuuc) echo icu ;;
+        icudata) echo icu ;;
         *) echo "$1" ;;
     esac
 }
@@ -1140,6 +1174,15 @@ check_cxx11 () {
     if $can_show; then
         show_no "C++11"
     fi
+}
+
+check_admin_deps () {
+    require "web UI dependencies"
+    local version
+    version=$(pkg version admin-deps)
+    add_fetch admin-deps
+    macro "GULP"         "\$(abspath \$(SUPPORT_BUILD_DIR)/admin-deps_$version/bin/gulp)"
+    macro "GULP_BIN_DEP" "\$(SUPPORT_BUILD_DIR)/admin-deps_$version/bin/gulp"
 }
 
 # The root of the source tree

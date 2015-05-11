@@ -47,9 +47,7 @@ block_id_t lookup(const internal_node_t *node, const btree_key_t *key) {
     return get_pair_by_index(node, index)->lnode;
 }
 
-// TODO: If it's unused, let's get rid of it.
-bool insert(UNUSED block_size_t block_size, internal_node_t *node, const btree_key_t *key, block_id_t lnode, block_id_t rnode) {
-    //TODO: write a unit test for this
+bool insert(internal_node_t *node, const btree_key_t *key, block_id_t lnode, block_id_t rnode) {
     rassert(key->size <= MAX_KEY_SIZE, "key too large");
     if (is_full(node)) return false;
     if (node->npairs == 0) {
@@ -335,7 +333,7 @@ bool is_mergable(block_size_t block_size, const internal_node_t *node, const int
         INTERNAL_EPSILON < block_size.value(); // must still have enough room for an arbitrary key  // TODO: we can't be tighter?
 }
 
-bool is_singleton(const internal_node_t *node) {
+bool is_doubleton(const internal_node_t *node) {
     return node->npairs == 2;
 }
 
@@ -366,7 +364,7 @@ int nodecmp(const internal_node_t *node1, const internal_node_t *node2) {
     const btree_key_t *key1 = &get_pair_by_index(node1, 0)->key;
     const btree_key_t *key2 = &get_pair_by_index(node2, 0)->key;
 
-    return sized_strcmp(key1->contents, key1->size, key2->contents, key2->size);
+    return btree_key_cmp(key1, key2);
 }
 
 namespace impl {
@@ -459,7 +457,7 @@ void make_last_pair_special(internal_node_t *node) {
 
 
 bool is_equal(const btree_key_t *key1, const btree_key_t *key2) {
-    return sized_strcmp(key1->contents, key1->size, key2->contents, key2->size) == 0;
+    return btree_key_cmp(key1, key2) == 0;
 }
 
 }  // namespace impl

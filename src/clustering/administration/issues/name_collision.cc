@@ -1,6 +1,7 @@
 // Copyright 2010-2014 RethinkDB, all rights reserved.
 #include "clustering/administration/issues/name_collision.hpp"
 #include "clustering/administration/datum_adapter.hpp"
+#include "clustering/table_manager/table_meta_client.hpp"
 #include "rdb_protocol/configured_limits.hpp"
 
 const datum_string_t server_name_collision_issue_t::server_name_collision_issue_type =
@@ -25,45 +26,54 @@ name_collision_issue_t::name_collision_issue_t(const issue_id_t &_issue_id,
     name(_name),
     collided_ids(_collided_ids) { }
 
-ql::datum_t build_server_db_info(const name_string_t &name,
-                                 const std::vector<uuid_u> &ids) {
+void generic_build_info_and_description(
+        const std::string &long_type_plural,
+        const char *short_type_singular,
+        const char *system_table_name,
+        const name_string_t &name,
+        const std::vector<uuid_u> &ids,
+        ql::datum_t *info_out,
+        datum_string_t *description_out) {
     ql::datum_object_builder_t builder;
     ql::datum_array_builder_t ids_builder(ql::configured_limits_t::unlimited);
+    std::string ids_str;
     for (auto const &id : ids) {
         ids_builder.add(convert_uuid_to_datum(id));
+        if (!ids_str.empty()) {
+            ids_str += ", ";
+        }
+        ids_str += uuid_to_str(id);
     }
     builder.overwrite("name", convert_name_to_datum(name));
     builder.overwrite("ids", std::move(ids_builder).to_datum());
-    return std::move(builder).to_datum();
-}
-
-datum_string_t build_server_db_description(const std::string &type,
-                                           const name_string_t &name,
-                                           const std::vector<machine_id_t> &ids) {
-    std::string ids_str;
-    for (auto it = ids.begin(); it != ids.end(); ++it) {
-        ids_str += strprintf("%s%s",
-                             it == ids.begin() ? "" : ", ", uuid_to_str(*it).c_str());
-    }
-    return datum_string_t(strprintf("The following %s are all named '%s': %s.",
-                                    type.c_str(), name.c_str(), ids_str.c_str()));
+    *info_out = std::move(builder).to_datum();
+    *description_out = datum_string_t(strprintf(
+        "There are multiple %s named `%s`. RethinkDB requires that every %s have a "
+        "unique name. Please update the `name` field of the conflicting %ss' documents "
+        "in the `rethinkdb.%s` system table.\n\nThe UUIDs of the conflicting %ss are as "
+        "follows: %s",
+        long_type_plural.c_str(), name.c_str(), short_type_singular, short_type_singular,
+        system_table_name, short_type_singular, ids_str.c_str()));
 }
 
 server_name_collision_issue_t::server_name_collision_issue_t(
         const name_string_t &_name,
-        const std::vector<machine_id_t> &_collided_ids) :
+        const std::vector<server_id_t> &_collided_ids) :
     name_collision_issue_t(from_hash(base_issue_id, _name),
                           _name,
                           _collided_ids) { }
 
-ql::datum_t server_name_collision_issue_t::build_info(
-        UNUSED const metadata_t &metadata) const {
-    return build_server_db_info(name, collided_ids);
-}
-
-datum_string_t server_name_collision_issue_t::build_description(
-        UNUSED const ql::datum_t &info) const {
-    return build_server_db_description("servers", name, collided_ids);
+bool server_name_collision_issue_t::build_info_and_description(
+        UNUSED const metadata_t &metadata,
+        UNUSED server_config_client_t *server_config_client,
+        UNUSED table_meta_client_t *table_meta_client,
+        UNUSED admin_identifier_format_t identifier_format,
+        ql::datum_t *info_out,
+        datum_string_t *description_out) const {
+    generic_build_info_and_description(
+        "servers", "server", "server_config", name, collided_ids,
+        info_out, description_out);
+    return true;
 }
 
 db_name_collision_issue_t::db_name_collision_issue_t(
@@ -73,14 +83,17 @@ db_name_collision_issue_t::db_name_collision_issue_t(
                           _name,
                           _collided_ids) { }
 
-ql::datum_t db_name_collision_issue_t::build_info(
-        UNUSED const metadata_t &metadata) const {
-    return build_server_db_info(name, collided_ids);
-}
-
-datum_string_t db_name_collision_issue_t::build_description(
-        UNUSED const ql::datum_t &info) const {
-    return build_server_db_description("databases", name, collided_ids);
+bool db_name_collision_issue_t::build_info_and_description(
+        UNUSED const metadata_t &metadata,
+        UNUSED server_config_client_t *server_config_client,
+        UNUSED table_meta_client_t *table_meta_client,
+        UNUSED admin_identifier_format_t identifier_format,
+        ql::datum_t *info_out,
+        datum_string_t *description_out) const {
+    generic_build_info_and_description(
+        "databases", "database", "db_config", name, collided_ids,
+        info_out, description_out);
+    return true;
 }
 
 table_name_collision_issue_t::table_name_collision_issue_t(
@@ -92,46 +105,37 @@ table_name_collision_issue_t::table_name_collision_issue_t(
                            _collided_ids),
     db_id(_db_id) { }
 
-ql::datum_t table_name_collision_issue_t::build_info(const metadata_t &metadata) const {
-    std::string db_name("__deleted_database__");
-    auto const db_it = metadata.databases.databases.find(db_id);
-    if (db_it != metadata.databases.databases.end() &&
-        !db_it->second.is_deleted()) {
-        db_name = db_it->second.get_ref().name.get_ref().str();
+bool table_name_collision_issue_t::build_info_and_description(
+        const metadata_t &metadata,
+        UNUSED server_config_client_t *server_config_client,
+        UNUSED table_meta_client_t *table_meta_client,
+        admin_identifier_format_t identifier_format,
+        ql::datum_t *info_out,
+        datum_string_t *description_out) const {
+    ql::datum_t db_name_or_uuid;
+    name_string_t db_name;
+    if (!convert_database_id_to_datum(db_id, identifier_format, metadata,
+            &db_name_or_uuid, &db_name)) {
+        db_name_or_uuid = ql::datum_t("__deleted_database__");
+        db_name = name_string_t::guarantee_valid("__deleted_database__");
     }
-
-    ql::datum_array_builder_t ids_builder(ql::configured_limits_t::unlimited);
-    for (auto const &id : collided_ids) {
-        ids_builder.add(convert_uuid_to_datum(id));
-    }
-
-    ql::datum_object_builder_t builder;
-    builder.overwrite("name", convert_name_to_datum(name));
-    builder.overwrite("db", convert_string_to_datum(db_name));
-    builder.overwrite("db_id", convert_uuid_to_datum(db_id));
-    builder.overwrite("ids", std::move(ids_builder).to_datum());
-    return std::move(builder).to_datum();
-}
-
-datum_string_t table_name_collision_issue_t::build_description(const ql::datum_t &info) const {
-    std::string ids_str;
-    for (auto id : collided_ids) {
-        ids_str += strprintf("%s%s",
-                             ids_str.empty() ? "" : ", ",
-                             uuid_to_str(id).c_str());
-    }
-
-    return datum_string_t(strprintf(
-        "The following tables in database '%s' are all named '%s': %s.",
-        info.get_field("db").as_str().to_std().c_str(),
-        name.c_str(),
-        ids_str.c_str()));
+    ql::datum_t partial_info;
+    generic_build_info_and_description(
+        strprintf("tables in database `%s`", db_name.c_str()),
+        "table", "table_config", name, collided_ids,
+        &partial_info, description_out);
+    ql::datum_object_builder_t info_rebuilder(partial_info);
+    info_rebuilder.overwrite("db", db_name_or_uuid);
+    *info_out = std::move(info_rebuilder).to_datum();
+    return true;
 }
 
 name_collision_issue_tracker_t::name_collision_issue_tracker_t(
             boost::shared_ptr<semilattice_read_view_t<cluster_semilattice_metadata_t> >
-                _cluster_sl_view) :
-    cluster_sl_view(_cluster_sl_view) { }
+                _cluster_sl_view,
+            table_meta_client_t *_table_meta_client) :
+    cluster_sl_view(_cluster_sl_view),
+    table_meta_client(_table_meta_client) { }
 
 name_collision_issue_tracker_t::~name_collision_issue_tracker_t() { }
 
@@ -155,25 +159,24 @@ void find_duplicates(const map_t &data,
 }
 
 void find_table_duplicates(
-        const namespaces_semilattice_metadata_t::namespace_map_t &data,
+        table_meta_client_t *table_meta_client,
         std::vector<scoped_ptr_t<issue_t> > *issues_out) {
+    std::map<namespace_id_t, table_basic_config_t> table_names;
+    table_meta_client->list_names(&table_names);
+
     std::map<std::pair<database_id_t, name_string_t>, std::vector<namespace_id_t> >
         name_counts;
-    for (auto const &it : data) {
-        if (!it.second.is_deleted()) {
-            std::pair<database_id_t, name_string_t> info =
-                std::make_pair(it.second.get_ref().database.get_ref(),
-                               it.second.get_ref().name.get_ref());
-            name_counts[info].push_back(it.first);
-        }
+    for (auto const &table_name : table_names) {
+        auto pair = std::make_pair(table_name.second.database, table_name.second.name);
+        name_counts[pair].push_back(table_name.first);
     }
 
-    for (auto const &it : name_counts) {
-        if (it.second.size() > 1) {
+    for (auto const &name_count : name_counts) {
+        if (name_count.second.size() > 1) {
             issues_out->push_back(scoped_ptr_t<issue_t>(
-                new table_name_collision_issue_t(it.first.second, // Table name
-                                                 it.first.first,  // Database
-                                                 it.second)));    // IDs of tables
+                new table_name_collision_issue_t(name_count.first.second,
+                                                 name_count.first.first,
+                                                 name_count.second)));
         }
     }
 }
@@ -182,9 +185,9 @@ std::vector<scoped_ptr_t<issue_t> > name_collision_issue_tracker_t::get_issues()
     cluster_semilattice_metadata_t metadata = cluster_sl_view->get();
     std::vector<scoped_ptr_t<issue_t> > issues;
 
-    find_duplicates<server_name_collision_issue_t>(metadata.machines.machines, &issues);
+    find_duplicates<server_name_collision_issue_t>(metadata.servers.servers, &issues);
     find_duplicates<db_name_collision_issue_t>(metadata.databases.databases, &issues);
-    find_table_duplicates(metadata.rdb_namespaces->namespaces, &issues);
+    find_table_duplicates(table_meta_client, &issues);
 
     return issues;
 }

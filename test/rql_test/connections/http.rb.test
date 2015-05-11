@@ -1,16 +1,25 @@
 #!/usr/bin/env python
 
-import os, sys, subprocess
+import os, sys, subprocess, time
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), os.pardir, os.pardir, "common"))
 import driver, utils
 
-if not os.path.isdir('run'):
-    os.makedirs('run')
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import http_support
 
-buildDir = os.getenv('BUILD_DIR') or utils.latest_build_dir()
-if len(sys.argv) > 1:
-    buildDir = sys.argv[1]
-os.environ['BUILD_DIR'] = buildDir
+targetServer = http_support.HttpTargetServer()
 
-server = driver.Process()
-sys.exit(subprocess.call([os.environ.get('INTERPRETER_PATH', 'ruby'), os.path.join(os.path.dirname(__file__), 'http.rb'), str(server.driver_port)]))
+os.environ['HTTPBIN_TEST_ADDRESS'] = 'localhost:%d' % targetServer.httpbinPort
+os.environ['HTTP_TEST_ADDRESS'] = 'localhost:%d' % targetServer.httpPort
+os.environ['HTTPS_TEST_ADDRESS'] = 'localhost:%d' % targetServer.sslPort
+
+rethinkdb_exe = sys.argv[1] if len(sys.argv) > 1 else utils.find_rethinkdb_executable()
+os.environ['RDB_EXE_PATH'] = rethinkdb_exe
+
+server = None
+if os.environ.get('RDB_DRIVER_PORT') is None:
+    server = driver.Process(executable_path=rethinkdb_exe)
+    os.environ['RDB_DRIVER_PORT'] = str(server.driver_port)
+
+sys.exit(subprocess.call([os.environ.get('INTERPRETER_PATH', 'ruby'), os.path.join(os.path.dirname(__file__), 'http.rb')]))

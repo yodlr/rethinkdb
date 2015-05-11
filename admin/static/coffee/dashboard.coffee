@@ -1,672 +1,396 @@
 # Copyright 2010-2012 RethinkDB, all rights reserved.
-# Dashboard: provides an overview and visualizations of the cluster
-# Dashboard View
-module 'DashboardView', ->
-    # Cluster.Container
-    class @Container extends Backbone.View
-        template: Handlebars.templates['dashboard_view-template']
-        id: 'dashboard_container'
 
-        events:
-            'click .view-logs': 'show_all_logs'
-
-        initialize: =>
-            log_initial '(initializing) dashboard container view'
-
-            @cluster_status_availability = new DashboardView.ClusterStatusAvailability()
-            @cluster_status_redundancy = new DashboardView.ClusterStatusRedundancy()
-            @cluster_status_reachability = new DashboardView.ClusterStatusReachability()
-            @cluster_status_consistency = new DashboardView.ClusterStatusConsistency()
-
-            @cluster_performance = new Vis.OpsPlot(computed_cluster.get_stats,
-                width:  833             # width in pixels
-                height: 300             # height in pixels
-                seconds: 119            # num seconds to track
-                type: 'cluster'
-            )
-
-            @logs = new DashboardView.Logs()
-
-        show_all_logs: ->
-            window.router.navigate '#logs',
-                trigger: true
-
-        render: =>
-            @.$el.html @template({})
-            @.$('.availability').html @cluster_status_availability.render().$el
-            @.$('.redundancy').html @cluster_status_redundancy.render().$el
-            @.$('.reachability').html @cluster_status_reachability.render().$el
-            @.$('.consistency').html @cluster_status_consistency.render().$el
-
-            @.$('#cluster_performance_container').html @cluster_performance.render().$el
-            @.$('.recent-log-entries-container').html @logs.render().$el
-
-            return @
-
-        destroy: =>
-            @cluster_status_availability.destroy()
-            @cluster_status_redundancy.destroy()
-            @cluster_status_reachability.destroy()
-            @cluster_status_consistency.destroy()
-            @cluster_performance.destroy()
-            @logs.destroy()
-
-    class @ClusterStatusAvailability extends Backbone.View
-        className: 'cluster-status-availability '
-
-        template: Handlebars.templates['cluster_status-container-template']
-        status_template: Handlebars.templates['cluster_status-availability_status-template']
-        popup_template: Handlebars.templates['cluster_status-availability-popup-template']
-
-        events:
-            'click .show_details': 'show_details'
-            'click .close': 'hide_details'
-
-        initialize: =>
-            @data = ''
-            directory.on 'all', @render_status
-            namespaces.on 'all', @render_status
-
-        # Convert blueprint role to directory expected status
-        convert_activity: (role) ->
-            switch role
-                when 'role_secondary' then return 'secondary_up_to_date'
-                when 'role_nothing' then return 'nothing'
-                when 'role_primary' then return 'primary'
-
-        compute_data: =>
-            num_masters = 0
-            num_masters_down = 0
-            namespaces_down = {}
-
-            # Look for masters in blueprint
-            directory_by_namespaces = DataUtils.get_directory_activities_by_namespaces()
-            for namespace in namespaces.models
-                namespace_id = namespace.get('id')
-                blueprint = namespace.get('blueprint').peers_roles
-                for machine_id of blueprint
-                    machine_name = machines.get(machine_id)?.get('name')
-                    if not machine_name?
-                        machine_name = machine_id
-
-                    for shard of blueprint[machine_id]
-                        value = blueprint[machine_id][shard]
-                        if value is "role_primary"
-                            num_masters++
-                        
-                            # Check if the master in blueprint is also master in the directory
-                            if !(directory_by_namespaces?) or !(directory_by_namespaces[namespace_id]?) or !(directory_by_namespaces[namespace_id][machine_id]?)
-                                num_masters_down++
-                                if not namespaces_down[namespace.get('id')]?
-                                    namespaces_down[namespace.get('id')] = []
-
-                                namespaces_down[namespace.get('id')].push
-                                    shard: human_readable_shard shard
-                                    namespace_id: namespace.get('id')
-                                    namespace_name: namespace.get('name')
-                                    machine_id: machine_id
-                                    machine_name: machine_name
-                                    blueprint_status: value
-                                    directory_status: 'Not found'
-                            else if directory_by_namespaces[namespace_id][machine_id][shard] != @convert_activity(value)
-                                num_masters_down++
-                                if not namespaces_down[namespace.get('id')]?
-                                    namespaces_down[namespace.get('id')] = []
-
-                                namespaces_down[namespace.get('id')].push
-                                    shard: human_readable_shard shard
-                                    namespace_id: namespace.get('id')
-                                    namespace_name: namespace.get('name')
-                                    machine_id: machine_id
-                                    machine_name: machine_name
-                                    blueprint_status: value
-                                    directory_status: directory_by_namespaces[namespace_id][machine_id][shard]
-
-            # Compute data for the template
-            if num_masters_down > 0
-                namespaces_down_array = []
-                for namespace_id, namespace_down of namespaces_down
-                    namespaces_down_array.push
-                        namespace_id: namespace_id
-                        namespace_name: namespaces.get(namespace_id).get('name')
-                        namespaces_down: namespace_down
-                data =
-                    status_is_ok: false
-                    num_namespaces_down: namespaces_down_array.length
-                    has_namespaces_down: namespaces_down_array.length>0
-                    num_namespaces: namespaces.length
-                    num_masters: num_masters
-                    num_masters_down: num_masters_down
-                    namespaces_down: (namespaces_down_array if namespaces_down_array.length > 0)
-            else
-                data =
-                    status_is_ok: true
-                    num_masters: num_masters
-
-            return data
-
-        render: =>
-            @.$el.html @template()
-            @render_status()
-
-        render_status: =>
-            data = @compute_data()
-            if _.isEqual(@data, data) is false # So we don't blow avay the popup
-                @data = data
-                @.$('.status').html @status_template data
-                if data.status_is_ok is true
-                    @.$('.status').addClass 'no-problems-detected'
-                    @.$('.status').removeClass 'problems-detected'
-                else
-                    @.$('.status').addClass 'problems-detected'
-                    @.$('.status').removeClass 'no-problems-detected'
-
-                if data.status_is_ok is false
-                    @.$('.popup_container').html @popup_template data
-                else
-                    @.$('.popup_container').html @popup_template
-                        has_namespaces_down: false
-
-
-            return @
-
-        clean_dom_listeners: =>
-            if @link_clicked?
-                @link_clicked.off 'mouseup', @stop_propagation
-            @.$('.popup_container').off 'mouseup', @stop_propagation
-            $(window).off 'mouseup', @hide_details
-
-        show_details: (event) =>
-            event.preventDefault()
-            @clean_dom_listeners()
-
-            @.$('.popup_container').show()
-            margin_top = event.pageY-60-13
-            margin_left= event.pageX+12
-            @.$('.popup_container').css 'margin', margin_top+'px 0px 0px '+margin_left+'px'
-
-            @link_clicked = @.$(event.target)
-            @link_clicked.on 'mouseup', @stop_propagation
-            @.$('.popup_container').on 'mouseup', @stop_propagation
-            $(window).on 'mouseup', @hide_details
-
-        stop_propagation: (event) ->
-            event.stopPropagation()
-
-        hide_details: (event) =>
-            @.$('.popup_container').hide()
-            @clean_dom_listeners()
-
-        destroy: =>
-            directory.off 'all', @render_status
-            namespaces.off 'all', @render_status
-            @clean_dom_listeners() # Optional since Jquery should be cleaning listeners itself
-
-    class @ClusterStatusRedundancy extends Backbone.View
-        className: 'cluster-status-redundancy'
-
-        template: Handlebars.templates['cluster_status-container-template']
-        status_template: Handlebars.templates['cluster_status-redundancy_status-template']
-        popup_template: Handlebars.templates['cluster_status-redundancy-popup-template']
-
-        events:
-            'click .show_details': 'show_details'
-            'click .close': 'hide_details'
-
-        initialize: =>
-            @data = ''
-            directory.on 'all', @render_status
-            namespaces.on 'all', @render_status
-
-        convert_activity: (role) ->
-            switch role
-                when 'role_secondary' then return 'secondary_up_to_date'
-                when 'role_nothing' then return 'nothing'
-                when 'role_primary' then return 'primary'
-
-
-        compute_data: =>
-            num_replicas = 0
-            num_replicas_down = 0
-            namespaces_down = {}
-
-            # Look for primaries and secondaries (= not nothing) in the blueprint 
-            directory_by_namespaces = DataUtils.get_directory_activities_by_namespaces()
-            for namespace in namespaces.models
-                namespace_id = namespace.get('id')
-                blueprint = namespace.get('blueprint').peers_roles
-                for machine_id of blueprint
-                    machine_name = machine_name = machines.get(machine_id)?.get('name') #TODO check later if defined
-                    if not machine_name?
-                        machine_name = machine_id
-
-                    for shard of blueprint[machine_id]
-                        value = blueprint[machine_id][shard]
-                        if value isnt "role_nothing"
-                            num_replicas++
-
-                            # Check if directory matches
-                            if !(directory_by_namespaces?) or !(directory_by_namespaces[namespace_id]?) or !(directory_by_namespaces[namespace_id][machine_id]?)
-                                num_replicas_down++
-                                if not namespaces_down[namespace.get('id')]?
-                                    namespaces_down[namespace.get('id')] = []
-
-                                namespaces_down[namespace.get('id')].push
-                                    shard: human_readable_shard shard
-                                    namespace_id: namespace.get('id')
-                                    namespace_name: namespace.get('name')
-                                    machine_id: machine_id
-                                    machine_name: machine_name
-                                    blueprint_status: value
-                                    directory_status: 'Not found'
-                            else if directory_by_namespaces[namespace_id][machine_id][shard] != @convert_activity(value)
-                                num_replicas_down++
-                                if not namespaces_down[namespace.get('id')]?
-                                    namespaces_down[namespace.get('id')] = []
-
-                                namespaces_down[namespace.get('id')].push
-                                    shard: human_readable_shard shard
-                                    namespace_id: namespace.get('id')
-                                    namespace_name: namespace.get('name')
-                                    machine_id: machine_id
-                                    machine_name: machine_name
-                                    blueprint_status: value
-                                    directory_status: directory_by_namespaces[namespace_id][machine_id][shard]
-
-            # Check unsatisfiable goals
-            num_unsatisfiable_goals = 0
-            namespaces_with_unsatisfiable_goals = []
-            for issue in issues.models
-                if issue.get('type') is 'UNSATISFIABLE_GOALS'
-                    num_unsatisfiable_goals++
-                    datacenters_with_issues = []
-                    for datacenter_id of issue.get('replica_affinities')
-                        num_replicas = issue.get('replica_affinities')[datacenter_id]
-                        if issue.get('primary_datacenter') is datacenter_id
-                            num_replicas++
-                        if num_replicas > issue.get('actual_machines_in_datacenters')[datacenter_id]
-                            if datacenter_id is universe_datacenter.get('id')
-                                datacenter_name = universe_datacenter.get('name')
-                            else
-                                datacenter_name = datacenters.get(datacenter_id)?.get('name')
-                            datacenters_with_issues.push
-                                datacenter_id: datacenter_id
-                                datacenter_name: datacenter_name
-                                num_replicas: num_replicas
-                    namespaces_with_unsatisfiable_goals.push
-                        namespace_id: issue.get('namespace_id')
-                        namespace_name: namespaces.get(issue.get('namespace_id')).get('name')
-                        datacenters_with_issues: datacenters_with_issues
-                        
-            # Compute data for template
-            if num_replicas_down > 0
-                namespaces_down_array = []
-                for namespace_id, namespace_down of namespaces_down
-                    namespaces_down_array.push
-                        namespace_id: namespace_id
-                        namespace_name: namespaces.get(namespace_id).get('name')
-                        namespaces_down: namespace_down
-                data =
-                    status_is_ok: false
-                    num_namespaces_down: namespaces_down_array.length
-                    has_namespaces_down: namespaces_down_array.length>0
-                    num_namespaces: namespaces.length
-                    num_replicas: num_replicas
-                    num_replicas_down: num_replicas_down
-                    namespaces_down: (namespaces_down_array if namespaces_down_array.length > 0)
-                    has_unsatisfiable_goals: num_unsatisfiable_goals > 0
-                    num_unsatisfiable_goals: num_unsatisfiable_goals
-                    namespaces_with_unsatisfiable_goals: namespaces_with_unsatisfiable_goals
-                
-            else
-                data =
-                    status_is_ok: num_unsatisfiable_goals is 0
-                    num_replicas: num_replicas
-                    has_unsatisfiable_goals: num_unsatisfiable_goals > 0
-                    num_unsatisfiable_goals: num_unsatisfiable_goals
-                    namespaces_with_unsatisfiable_goals: namespaces_with_unsatisfiable_goals
-
-            return data
-
-        render: =>
-            @.$el.html @template()
-            @render_status()
-
-        # So we don't blow away the popup
-        render_status: =>
-            data = @compute_data()
-            if _.isEqual(@data, data) is false
-                @data = data
-                @.$('.status').html @status_template data
-                if data.status_is_ok is true
-                    @.$('.status').addClass 'no-problems-detected'
-                    @.$('.status').removeClass 'problems-detected'
-                else
-                    @.$('.status').addClass 'problems-detected'
-                    @.$('.status').removeClass 'no-problems-detected'
-
-                if data.status_is_ok is false
-                    @.$('.popup_container').html @popup_template data
-                else
-                    @.$('.popup_container').html @popup_template
-                        has_namespaces_down: false
-
-
-            return @
-
-        clean_dom_listeners: =>
-            if @link_clicked?
-                @link_clicked.off 'mouseup', @stop_propagation
-            @.$('.popup_container').off 'mouseup', @stop_propagation
-            $(window).off 'mouseup', @hide_details
-
-        show_details: (event) =>
-            event.preventDefault()
-            @clean_dom_listeners()
-
-            @.$('.popup_container').show()
-            margin_top = event.pageY-60-13
-            margin_left= event.pageX+12
-            @.$('.popup_container').css 'margin', margin_top+'px 0px 0px '+margin_left+'px'
-
-
-            @.$('.popup_container').on 'mouseup', @stop_propagation
-            @link_clicked = @.$(event.target)
-            @link_clicked.on 'mouseup', @stop_propagation
-
-            $(window).on 'mouseup', @hide_details
-
-        stop_propagation: (event) ->
-            event.stopPropagation()
-
-        hide_details: (event) =>
-            @.$('.popup_container').hide()
-            @clean_dom_listeners()
-
-        destroy: =>
-            directory.off 'all', @render_status
-            namespaces.off 'all', @render_status
-            @clean_dom_listeners()
-
-    class @ClusterStatusReachability extends Backbone.View
-        className: 'cluster-status-redundancy'
-
-        template: Handlebars.templates['cluster_status-container-template']
-        status_template: Handlebars.templates['cluster_status-reachability_status-template']
-        popup_template: Handlebars.templates['cluster_status-reachability-popup-template']
-
-        events:
-            'click .show_details': 'show_details'
-            'click .close': 'hide_details'
-
-        initialize: =>
-            @data = ''
-            directory.on 'all', @render_status
-            machines.on 'all', @render_status
-
-
-        compute_data: =>
-            # Look for machines down
-            machines_down = {}
-            for machine in machines.models
-                machines_down[machine.get('id')] = true
-
-            for machine in directory.models
-                if directory.get(machine.get('id'))? # Don't count ghosts
-                    machines_down[machine.get('id')] = false
-
-            machines_down_array = []
-            for machine_id of machines_down
-                if machines_down[machine_id] is false
-                    continue
-
-                machines_down_array.push
-                    machine_id: machine_id
-                    machine_name: machines.get(machine_id).get('name')
-
-            # Data for the template
-            data =
-                has_machines_down: machines_down_array.length > 0
-                num_machines_down: machines_down_array.length
-                num_machines: machines.length
-                machines_down: machines_down_array
-        
-            return data
-
-        render: =>
-            @.$el.html @template()
-            @render_status()
-
-        # So we don't blow avay the popup
-        render_status: =>
-            data = @compute_data()
-            if _.isEqual(@data, data) is false
-                @data = data
-                @.$('.status').html @status_template data
-                if data.has_machines_down is false
-                    @.$('.status').addClass 'no-problems-detected'
-                    @.$('.status').removeClass 'problems-detected'
-                else
-                    @.$('.status').addClass 'problems-detected'
-                    @.$('.status').removeClass 'no-problems-detected'
-
-                @.$('.popup_container').html @popup_template data
-
-            return @
-
-        # Clean the dom listeners
-        clean_dom_listeners: =>
-            if @link_clicked?
-                @link_clicked.off 'mouseup', @stop_propagation
-            @.$('.popup_container').off 'mouseup', @stop_propagation
-            $(window).off 'mouseup', @hide_details
-
-        # Show popup
-        show_details: (event) =>
-            event.preventDefault()
-            @clean_dom_listeners() # Remove the DOM listeners because we are going to add them later
-
-            @.$('.popup_container').show()
-            margin_top = event.pageY-60-13
-            margin_left= event.pageX-12-470
-            @.$('.popup_container').css 'margin', margin_top+'px 0px 0px '+margin_left+'px' # Set the popup next to the mouse
-
-
-            @.$('.popup_container').on 'mouseup', @stop_propagation
-            @link_clicked = @.$(event.target)
-            @link_clicked.on 'mouseup', @stop_propagation
-            $(window).on 'mouseup', @hide_details
-
-        stop_propagation: (event) ->
-            event.stopPropagation()
-
-        hide_details: (event) =>
-            @.$('.popup_container').hide()
-            @clean_dom_listeners()
-
-        destroy: =>
-            directory.off 'all', @render_status
-            machines.off 'all', @render_status
-            @clean_dom_listeners()
-
-    class @ClusterStatusConsistency extends Backbone.View
-        className: 'cluster-status-consistency'
-
-        template: Handlebars.templates['cluster_status-container-template']
-        status_template: Handlebars.templates['cluster_status-consistency_status-template']
-        popup_template: Handlebars.templates['cluster_status-consistency-popup-template']
-
-        events:
-            'click .show_details': 'show_details'
-            'click .close': 'hide_details'
-
-        initialize: =>
-            @data = ''
-            issues.on 'all', @render_status
-
-        compute_data: =>
-            # Looking for vclock conflict
-            conflicts = []
-            for issue in issues.models
-                if issue.get('type') is 'VCLOCK_CONFLICT'
-                    type = issue.get('object_type')
-                    switch type
-                        when 'namespace'
-                            type = 'table'
-                            if namespaces.get(issue.get('object_id'))?
-                                name = namespaces.get(issue.get('object_id')).get('name')
-                            else
-                                name = 'Not found table'
-                        when 'database'
-                            type = 'database'
-                            if databases.get(issue.get('object_id'))
-                                name = databases.get(issue.get('object_id')).get('name')
-                            else
-                                name = 'Not found database'
-                        when 'datacenter'
-                            type = 'datacenter'
-                            if issue.get('object_id') is universe_datacenter.get('id')
-                                name = universe_datacenter.get('name')
-                            else if datacenters.get(issue.get('object_id'))?
-                                name = datacenters.get(issue.get('object_id')).get('name')
-                            else
-                                name = 'Not found datacenter'
-                        when 'machine'
-                            type = 'server'
-                            if machines.get(issue.get('object_id'))
-                                name = machines.get(issue.get('object_id')).get('name')
-                            else
-                                name = 'Not found server'
-
-                    conflicts.push
-                        id: issue.get('object_id')
-                        type: type # Use this to generate url
-                        name: name
-                        field: issue.get('field')
-
-
-            types = {}
-            num_types_conflicts = 0
-            for conflict in conflicts
-                if not types[conflict.type]?
-                    types[conflict.type] = 1
-                    num_types_conflicts++
-                else
-                    types[conflict.type]++
-                
-            has_conflicts: conflicts.length > 0
-            conflicts: conflicts
-            has_multiple_types: num_types_conflicts > 1
-            num_types_conflicts:num_types_conflicts
-            types: (type if num_types_conflicts is 1)
-            type: (type if type?)
-            num_conflicts: conflicts.length
-            num_namespaces_conflicting: conflicts.length
-            num_namespaces: namespaces.length
-
-        render: =>
-            @.$el.html @template()
-            @render_status()
-
-        render_status: =>
-            data = @compute_data()
-            if _.isEqual(@data, data) is false
-                @.$('.status').html @status_template data
-                if data.has_conflicts is false
-                    @.$('.status').addClass 'no-problems-detected'
-                    @.$('.status').removeClass 'problems-detected'
-                else
-                    @.$('.status').addClass 'problems-detected'
-                    @.$('.status').removeClass 'no-problems-detected'
-
-                @.$('.popup_container').html @popup_template data
-            return @
-
-        clean_dom_listeners: =>
-            if @link_clicked?
-                @link_clicked.off 'mouseup', @stop_propagation
-            @.$('.popup_container').off 'mouseup', @stop_propagation
-            $(window).off 'mouseup', @hide_details
-
-        show_details: (event) =>
-            event.preventDefault()
-            @clean_dom_listeners()
-            @.$('.popup_container').show()
-            margin_top = event.pageY-60-13
-            margin_left= event.pageX-12-470
-            @.$('.popup_container').css 'margin', margin_top+'px 0px 0px '+margin_left+'px'
-
-
-            @.$('.popup_container').on 'mouseup', @stop_propagation
-            @link_clicked = @.$(event.target)
-            @link_clicked.on 'mouseup', @stop_propagation
-            $(window).on 'mouseup', @hide_details
-
-        stop_propagation: (event) ->
-            event.stopPropagation()
-
-        hide_details: (event) =>
-            @.$('.popup_container').hide()
-            @clean_dom_listeners()
-
-        destroy: =>
-            issues.off 'all', @render_status
-            @clean_dom_listeners()
-
-
-    class @Logs extends Backbone.View
-        className: 'log-entries'
-        tagName: 'ul'
-        min_timestamp: 0
-        max_entry_logs: 5
-        interval_update_log: 10000
-        compact_entries: true
-
-        initialize: ->
-            @fetch_log()
-            @interval = setInterval @fetch_log, @interval_update_log
-            @log_entries = []
-
-        fetch_log: =>
-            $.ajax({
-                contentType: 'application/json'
-                url: 'ajax/log/_?max_length='+@max_entry_logs+'&min_timestamp='+@min_timestamp
-                dataType: 'json'
-                success: @set_log_entries
-            })
-
-        set_log_entries: (response) =>
-            need_render = false
-            for machine_id, data of response
-                for new_log_entry in data
-                    for old_log_entry, i in @log_entries
-                        if parseFloat(new_log_entry.timestamp) > parseFloat(old_log_entry.get('timestamp'))
-                            entry = new LogEntry new_log_entry
-                            entry.set('machine_uuid', machine_id)
-                            @log_entries.splice i, 0, entry
-                            need_render = true
-                            break
-
-                    if @log_entries.length < @max_entry_logs
-                        entry = new LogEntry new_log_entry
-                        entry.set('machine_uuid', machine_id)
-                        @log_entries.push entry
-                        need_render = true
-                    else if @log_entries.length > @max_entry_logs
-                        @log_entries.pop()
-
-            if need_render
+app = require('./app.coffee')
+driver = app.driver
+system_db = app.system_db
+models = require('./models.coffee')
+log_view = require('./log_view.coffee')
+vis = require('./vis.coffee')
+
+r = require('rethinkdb')
+
+# DashboardContainer is responsible to retrieve all the data displayed
+# on the dashboard.
+class DashboardContainer extends Backbone.View
+    id: 'dashboard_container'
+    template:
+        error: require('../handlebars/error-query.hbs')
+
+    initialize: =>
+        if not app.view_data_backup.dashboard_view_dashboard?
+            app.view_data_backup.dashboard_view_dashboard = new models.Dashboard
+        @dashboard = app.view_data_backup.dashboard_view_dashboard
+
+        @dashboard_view = new DashboardMainView
+            model: @dashboard
+
+        @fetch_data()
+
+    fetch_data: =>
+        A = driver.admin()
+        query = r.do(
+            A.table_status.coerceTo('array'),
+            A.table_config_id.coerceTo('array'),
+            A.server_config.coerceTo('array'),
+            A.server_status.coerceTo('array'),
+            A.jobs.coerceTo('array'),
+            A.current_issues.coerceTo('array'),
+            (table_status, table_config_id, server_config,
+             server_status, jobs, current_issues) ->
+                Q = driver.queries
+                r.expr(
+                    num_primaries:
+                        Q.num_primaries(table_config_id)
+                    num_connected_primaries:
+                        Q.num_connected_primaries(table_status)
+                    num_replicas:
+                        Q.num_replicas(table_config_id)
+                    num_connected_replicas:
+                        Q.num_connected_replicas(table_status)
+                    tables_with_primaries_not_ready:
+                        Q.tables_with_primaries_not_ready(
+                            table_config_id, table_status)
+                    tables_with_replicas_not_ready:
+                        Q.tables_with_replicas_not_ready(
+                            table_config_id, table_status)
+                    num_tables: table_config_id.count()
+                    num_servers: server_status.count()
+                    num_connected_servers:
+                        Q.num_connected_servers(server_status)
+                    disconnected_servers:
+                        Q.disconnected_servers(server_status)
+                    num_disconnected_tables:
+                        Q.num_disconnected_tables(table_status)
+                    num_tables_w_missing_replicas:
+                        Q.num_tables_w_missing_replicas(table_status)
+                    num_sindex_issues:
+                        Q.num_sindex_issues(current_issues)
+                    num_sindexes_constructing:
+                        Q.num_sindexes_constructing(jobs)
+                )
+        )
+        dashboard_callback = (error, result) =>
+            if error?
+                console.log error
+                @error = error
                 @render()
+            else
+                rerender = @error?
+                @error = null
+                @dashboard.set result
+                if rerender
+                    @render()
 
-            if @log_entries[0]? and _.isNaN(parseFloat(@log_entries[0].get('timestamp'))) is false
-                @min_timestamp = parseFloat(@log_entries[0].get('timestamp'))+1
+        @main_timer = driver.run query, 5000, dashboard_callback
 
-        render: =>
-            @.$el.html ''
-            for log in @log_entries
-                view = new LogView.LogEntry model: log
-                @.$el.append view.render(@compact_entries).$el
-            return @
 
-        destroy: =>
-            clearInterval @interval
+    render: =>
+        if @error?
+            @$el.html @template.error
+                error: @error?.message
+                url: '#'
+        else
+            @$el.html @dashboard_view.render().$el
+        @
+
+    remove: =>
+        driver.stop_timer @main_timer
+        if @dashboard_view
+            @dashboard_view.remove()
+        super()
+
+class DashboardMainView extends Backbone.View
+    template: require('../handlebars/dashboard_view.hbs')
+    id: 'dashboard_main_view'
+
+    events:
+        'click .view-logs': 'show_all_logs'
+
+    initialize: =>
+        @cluster_status_availability = new ClusterStatusAvailability
+            model: @model
+        @cluster_status_redundancy = new ClusterStatusRedundancy
+            model: @model
+        @cluster_status_connectivity = new ClusterStatusConnectivity
+            model: @model
+        @cluster_status_sindexes = new ClusterStatusSindexes
+            model: @model
+
+        @stats = new models.Stats
+
+        @stats_timer = driver.run(
+            r.db(system_db)
+            .table('stats').get(['cluster'])
+            .do((stat) ->
+                keys_read: stat('query_engine')('read_docs_per_sec')
+                keys_set: stat('query_engine')('written_docs_per_sec')
+            ), 1000, @stats.on_result)
+
+        @cluster_performance = new vis.OpsPlot(@stats.get_stats,
+            width:  833             # width in pixels
+            height: 300             # height in pixels
+            seconds: 119            # num seconds to track
+            type: 'cluster'
+        )
+
+        @logs = new log_view.LogsContainer
+            limit: 5
+            query: driver.queries.all_logs
+
+
+    show_all_logs: ->
+        app.main.router.navigate '#logs',
+            trigger: true
+
+    render: =>
+        @$el.html @template({})
+        @$('.availability').html @cluster_status_availability.render().$el
+        @$('.redundancy').html @cluster_status_redundancy.render().$el
+        @$('.connectivity').html @cluster_status_connectivity.render().$el
+        @$('.sindexes').html @cluster_status_sindexes.render().$el
+
+        @$('#cluster_performance_container').html @cluster_performance.render().$el
+        @$('.recent-log-entries-container').html @logs.render().$el
+
+        return @
+
+    remove: =>
+        driver.stop_timer @stats_timer
+
+        @cluster_status_availability.remove()
+        @cluster_status_redundancy.remove()
+        @cluster_status_connectivity.remove()
+        @cluster_performance.remove()
+        @cluster_status_sindexes.remove()
+        @logs.remove()
+        super()
+
+class ClusterStatusAvailability extends Backbone.View
+    className: 'cluster-status-availability '
+
+    template: require('../handlebars/dashboard_availability.hbs')
+
+    events:
+        'click .show_details': 'show_popup'
+        'click .close': 'hide_popup'
+
+    initialize: =>
+        # We could eventually properly create a collection from @model.get('shards')
+        # But this is probably not worth the effort for now.
+
+        @listenTo @model, 'change:num_primaries', @render
+        @listenTo @model, 'change:num_connected_primaries', @render
+
+        $(window).on 'mouseup', @hide_popup
+        @$el.on 'click', @stop_propagation
+
+
+        @display_popup = false
+        @margin = {}
+
+    stop_propagation: (event) ->
+        event.stopPropagation()
+
+    show_popup: (event) =>
+        if event?
+            event.preventDefault()
+
+            @margin.top = event.pageY-60-13
+            @margin.left = event.pageX+12
+
+        @$('.popup_container').show()
+        @$('.popup_container').css 'margin', @margin.top+'px 0px 0px '+@margin.left+'px'
+        @display_popup = true
+
+    hide_popup: (event) =>
+        event.preventDefault()
+        @display_popup = false
+        @$('.popup_container').hide()
+
+    render: =>
+        template_model =
+            status_is_ok: @model.get('num_connected_primaries') is @model.get('num_primaries')
+            num_primaries: @model.get 'num_primaries'
+            num_connected_primaries: @model.get 'num_connected_primaries'
+            num_disconnected_primaries: @model.get('num_primaries')-@model.get('num_connected_primaries')
+            num_disconnected_tables: @model.get 'num_disconnected_tables'
+            num_tables_w_missing_replicas: @model.get 'num_tables_w_missing_replicas'
+            num_tables: @model.get 'num_tables'
+            tables_with_primaries_not_ready: @model.get('tables_with_primaries_not_ready')
+        @$el.html @template template_model
+
+        if @display_popup is true and @model.get('num_connected_primaries') isnt @model.get('num_primaries')
+            # We re-display the pop up only if there are still issues
+            @show_popup()
+
+        @
+
+    remove: =>
+        @stopListening()
+        $(window).off 'mouseup', @remove_popup
+        super()
+
+class ClusterStatusRedundancy extends Backbone.View
+    className: 'cluster-status-redundancy'
+
+    template: require('../handlebars/dashboard_redundancy.hbs')
+
+    events:
+        'click .show_details': 'show_popup'
+        'click .close': 'hide_popup'
+
+    initialize: =>
+        # We could eventually properly create a collection from @model.get('shards')
+        # But this is probably not worth the effort for now.
+
+        @listenTo @model, 'change:num_replicas', @render
+        @listenTo @model, 'change:num_connected_replicas', @render
+
+        $(window).on 'mouseup', @hide_popup
+        @$el.on 'click', @stop_propagation
+
+
+        @display_popup = false
+        @margin = {}
+
+    stop_propagation: (event) ->
+        event.stopPropagation()
+
+    show_popup: (event) =>
+        if event?
+            event.preventDefault()
+
+            @margin.top = event.pageY-60-13
+            @margin.left = event.pageX+12
+
+        @$('.popup_container').show()
+        @$('.popup_container').css 'margin', @margin.top+'px 0px 0px '+@margin.left+'px'
+        @display_popup = true
+
+    hide_popup: (event) =>
+        event.preventDefault()
+        @display_popup = false
+        @$('.popup_container').hide()
+
+    render: =>
+        #TODO: Do we have to handle unsatisfiable goals here?
+        @$el.html @template
+            status_is_ok: @model.get('num_connected_replicas') is @model.get('num_replicas')
+            num_replicas: @model.get 'num_replicas'
+            num_connected_replicas: @model.get 'num_available_replicas'
+            num_disconnected_replicas: @model.get('num_replicas')-@model.get('num_connected_replicas')
+            num_disconnected_tables: @model.get 'num_disconnected_tables'
+            num_tables_w_missing_replicas: @model.get 'num_tables_w_missing_replicas'
+            num_tables: @model.get 'num_tables'
+            tables_with_replicas_not_ready: @model.get('tables_with_replicas_not_ready')
+
+        if @display_popup is true and @model.get('num_connected_replicas') isnt @model.get('num_replicas')
+            # We re-display the pop up only if there are still issues
+            @show_popup()
+
+        @
+
+    remove: =>
+        @stopListening()
+        $(window).off 'mouseup', @remove_popup
+        super()
+
+class ClusterStatusConnectivity extends Backbone.View
+    className: 'cluster-status-connectivity '
+
+    template: require('../handlebars/dashboard_connectivity.hbs')
+
+    events:
+        'click .show_details': 'show_popup'
+        'click .close': 'hide_popup'
+
+    initialize: =>
+        # We could eventually properly create a collection from @model.get('shards')
+        # But this is probably not worth the effort for now.
+
+        @listenTo @model, 'change:num_servers', @render
+        @listenTo @model, 'change:num_connected_servers', @render
+
+        $(window).on 'mouseup', @hide_popup
+        @$el.on 'click', @stop_propagation
+
+
+        @display_popup = false
+        @margin = {}
+
+    stop_propagation: (event) ->
+        event.stopPropagation()
+
+    show_popup: (event) =>
+        if event?
+            event.preventDefault()
+
+            @margin.top = event.pageY-60-13
+            @margin.left = event.pageX+12
+
+        @$('.popup_container').show()
+        @$('.popup_container').css 'margin', @margin.top+'px 0px 0px '+@margin.left+'px'
+        @display_popup = true
+
+    hide_popup: (event) =>
+        event.preventDefault()
+        @display_popup = false
+        @$('.popup_container').hide()
+
+    render: =>
+        template_model =
+            status_is_ok: @model.get('num_connected_servers') is @model.get('num_servers')
+            num_servers: @model.get 'num_servers'
+            num_disconnected_servers: @model.get('num_servers')-@model.get('num_connected_servers')
+            num_connected_servers: @model.get 'num_connected_servers'
+            disconnected_servers: @model.get 'disconnected_servers'
+        @$el.html @template template_model
+
+        if @display_popup is true and @model.get('num_connected_servers') isnt @model.get('num_servers')
+            # We re-display the pop up only if there are still issues
+            @show_popup()
+
+        @
+
+    remove: =>
+        @stopListening()
+        $(window).off 'mouseup', @remove_popup
+        super()
+
+
+class ClusterStatusSindexes extends Backbone.View
+    className: 'cluster-status-sindexes'
+
+    template: require('../handlebars/dashboard_sindexes.hbs')
+
+    initialize: =>
+        @listenTo @model, 'change:num_sindex_issues', @render
+        @listenTo @model, 'change:num_sindexes_constructing', @render
+
+    render: =>
+        issues = @model.get('num_sindex_issues') > 1
+        constructing = @model.get('num_sindexes_constructing')
+        if issues or constructing
+            section_class = 'problems-detected'
+            issue_class = if issues then 'bad' else 'good'
+            constructing_class = if constructing then 'bad' else 'good'
+        else
+            section_class = 'no-problems-detected'
+            issue_class = 'good'
+            constructing_class = 'good'
+
+        template_model =
+            section_class: section_class
+            issue_class: issue_class
+            constructing_class: constructing_class
+            num_sindex_issues: @model.get('num_sindex_issues')
+            num_sindexes_constructing: @model.get('num_sindexes_constructing')
+        @$el.html @template template_model
+        @
+
+exports.DashboardContainer = DashboardContainer
+exports.DashboardMainView = DashboardMainView
+exports.ClusterStatusAvailability = ClusterStatusAvailability
+exports.ClusterStatusRedundancy = ClusterStatusRedundancy
+exports.ClusterStatusConnectivity = ClusterStatusConnectivity
+exports.ClusterStatusSindexes = ClusterStatusSindexes

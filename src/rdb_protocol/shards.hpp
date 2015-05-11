@@ -15,19 +15,23 @@
 #include "rdb_protocol/batching.hpp"
 #include "rdb_protocol/configured_limits.hpp"
 #include "rdb_protocol/datum.hpp"
+#include "rdb_protocol/datum_utils.hpp"
 #include "rdb_protocol/profile.hpp"
-#include "rdb_protocol/rdb_protocol_json.hpp"
 #include "rdb_protocol/wire_func.hpp"
 
-enum class sorting_t {
-    UNORDERED,
-    ASCENDING,
-    DESCENDING
-};
-// UNORDERED sortings aren't reversed
-bool reversed(sorting_t sorting);
+enum class is_primary_t { NO, YES };
 
 namespace ql {
+
+template<class T>
+T groups_to_batch(std::map<datum_t, T, optional_datum_less_t> *g) {
+    if (g->size() == 0) {
+        return T();
+    } else {
+        r_sanity_check(g->size() == 1 && !g->begin()->first.has());
+        return std::move(g->begin()->second);
+    }
+}
 
 // This stuff previously resided in the protocol, but has been broken out since
 // we want to use this logic in multiple places.
@@ -35,19 +39,20 @@ typedef std::vector<ql::datum_t> datums_t;
 typedef std::map<ql::datum_t, datums_t, optional_datum_less_t> groups_t;
 
 struct rget_item_t {
-    rget_item_t() { }
-    // Works for both rvalue and lvalue references.
-    template<class T>
-    rget_item_t(T &&_key,
-                const ql::datum_t &_sindex_key,
-                const ql::datum_t &_data)
-        : key(std::forward<T>(_key)), sindex_key(_sindex_key), data(_data) { }
+    rget_item_t() = default;
+    rget_item_t(store_key_t _key,
+                ql::datum_t _sindex_key,
+                ql::datum_t _data)
+        : key(std::move(_key)),
+          sindex_key(std::move(_sindex_key)),
+          data(std::move(_data)) { }
     store_key_t key;
     ql::datum_t sindex_key, data;
-    RDB_DECLARE_ME_SERIALIZABLE;
 };
 
-RDB_SERIALIZE_OUTSIDE(rget_item_t);
+RDB_DECLARE_SERIALIZABLE(rget_item_t);
+
+void debug_print(printf_buffer_t *, const rget_item_t &);
 
 typedef std::vector<rget_item_t> stream_t;
 
@@ -58,10 +63,7 @@ public:
                 const datum_t &_val);
 
     void swap_if_other_better(optimizer_t *other,
-                              reql_version_t reql_version,
-                              bool (*beats)(reql_version_t,
-                                            const datum_t &val1,
-                                            const datum_t &val2));
+                              bool (*beats)(const datum_t &val1, const datum_t &val2));
     datum_t unpack(const char *name);
     datum_t row, val;
 };
@@ -161,35 +163,30 @@ archive_result_t deserialize_grouped(read_stream_t *s, datums_t *ds) {
     return deserialize<W>(s, ds);
 }
 
-// Passing this means the caller affirms that they're not iterating a grouped_t in a
-// way such that its map order matters.  (This means that its optional_datum_less_t
-// can use any reql version, and it doesn't need the value as a parameter.)
-namespace grouped {
-enum class order_doesnt_matter_t { };
-}
-
 // This is basically a templated typedef with special serialization.
 template<class T>
 class grouped_t {
 public:
-    // We assume v1_14 ordering.  We could get fancy and allow either v1_13 or v1_14
+    // We assume > v1_13 ordering.  We could get fancy and allow any
     // ordering, but usage of grouped_t inside of secondary index functions is the
     // only place where we'd want v1_13 ordering, so let's not bother.
-    grouped_t() : m(optional_datum_less_t(reql_version_t::v1_16_is_latest)) { }
+    grouped_t() : m(optional_datum_less_t()) { }
     virtual ~grouped_t() { } // See grouped_data_t below.
     template <cluster_version_t W>
+    friend
     typename std::enable_if<W == cluster_version_t::CLUSTER, void>::type
-    rdb_serialize(write_message_t *wm) const {
-        serialize_varint_uint64(wm, m.size());
-        for (auto it = m.begin(); it != m.end(); ++it) {
+    serialize(write_message_t *wm, const grouped_t &g) {
+        serialize_varint_uint64(wm, g.m.size());
+        for (auto it = g.m.begin(); it != g.m.end(); ++it) {
             serialize_grouped<W>(wm, it->first);
             serialize_grouped<W>(wm, it->second);
         }
     }
     template <cluster_version_t W>
+    friend
     typename std::enable_if<W == cluster_version_t::CLUSTER, archive_result_t>::type
-    rdb_deserialize(read_stream_t *s) {
-        guarantee(m.empty());
+    deserialize(read_stream_t *s, grouped_t *g) {
+        guarantee(g->m.empty());
 
         uint64_t sz;
         archive_result_t res = deserialize_varint_uint64(s, &sz);
@@ -197,14 +194,14 @@ public:
         if (sz > std::numeric_limits<size_t>::max()) {
             return archive_result_t::RANGE_ERROR;
         }
-        auto pos = m.begin();
+        auto pos = g->m.begin();
         for (uint64_t i = 0; i < sz; ++i) {
             std::pair<datum_t, T> el;
             res = deserialize_grouped<W>(s, &el.first);
             if (bad(res)) { return res; }
             res = deserialize_grouped<W>(s, &el.second);
             if (bad(res)) { return res; }
-            pos = m.insert(pos, std::move(el));
+            pos = g->m.insert(pos, std::move(el));
         }
         return archive_result_t::SUCCESS;
     }
@@ -214,10 +211,12 @@ public:
     // since the parallel map provides its own ordering (that you specify).  This
     // way, we know it's OK for the map ordering to use any reql_version (instead of
     // taking that as a parameter, which would be completely impracticable).
-    typename std::map<datum_t, T, optional_datum_less_t>::iterator
-    begin(grouped::order_doesnt_matter_t) { return m.begin(); }
-    typename std::map<datum_t, T, optional_datum_less_t>::iterator
-    end(grouped::order_doesnt_matter_t) { return m.end(); }
+    typename std::map<datum_t, T, optional_datum_less_t>::iterator begin() {
+        return m.begin();
+    }
+    typename std::map<datum_t, T, optional_datum_less_t>::iterator end() {
+        return m.end();
+    }
 
     std::pair<typename std::map<datum_t, T, optional_datum_less_t>::iterator, bool>
     insert(std::pair<datum_t, T> &&val) {
@@ -233,15 +232,23 @@ public:
     T &operator[](const datum_t &k) { return m[k]; }
 
     void swap(grouped_t<T> &other) { m.swap(other.m); }
-    std::map<datum_t, T, optional_datum_less_t> *
-    get_underlying_map(grouped::order_doesnt_matter_t) {
+    std::map<datum_t, T, optional_datum_less_t> *get_underlying_map() {
         return &m;
     }
+
+    const std::map<datum_t, T, optional_datum_less_t> *get_underlying_map() const {
+        return &m;
+    }
+
 private:
     std::map<datum_t, T, optional_datum_less_t> m;
 };
 
-RDB_SERIALIZE_TEMPLATED_OUTSIDE(grouped_t);
+template <class T>
+void debug_print(printf_buffer_t *buf, const grouped_t<T> &value) {
+    buf->appendf("grouped_t");
+    debug_print(buf, *value.get_underlying_map());
+}
 
 namespace grouped_details {
 
@@ -264,35 +271,6 @@ private:
 
 }  // namespace grouped_details
 
-// For some people that iterate a grouped_t, order matters.  If the grouped_t is
-// sorted by a different ordering than the one which they're expecting (because of
-// reql version compatibility), we have to copy the elements to a vector and sort
-// them before iterating them.
-template <class T, class Callable>
-void iterate_ordered_by_version(reql_version_t reql_version,
-                                grouped_t<T> &grouped,  // NOLINT(runtime/references)
-                                Callable &&callable) {
-    std::map<datum_t, T, optional_datum_less_t> *m
-        = grouped.get_underlying_map(grouped::order_doesnt_matter_t());
-    if (m->key_comp().reql_version() == reql_version) {
-        for (std::pair<const datum_t, T> &pair : *m) {
-            callable(pair.first, pair.second);
-        }
-    } else {
-        // The map is sorted with the wrong reql_version.  Copy it into a vector and
-        // sort it first.
-        std::vector<std::pair<datum_t, T> > vec(m->begin(), m->end());
-        // The keys (pulled straight out of a std::map) are unique, so std::sort
-        // works fine.
-        std::sort(vec.begin(), vec.end(),
-                  grouped_details::grouped_pair_compare_t<T>(reql_version));
-        for (std::pair<datum_t, T> &pair : vec) {
-            callable(pair.first, pair.second);
-        }
-    }
-}
-
-
 // We need a separate class for this because inheriting from
 // `slow_atomic_countable_t` deletes our copy constructor, but boost variants
 // want us to have a copy constructor.
@@ -305,7 +283,7 @@ typedef boost::variant<
     grouped_t<std::pair<double, uint64_t> >, // Avg.
     grouped_t<ql::datum_t>, // Reduce (may be NULL)
     grouped_t<optimizer_t>, // min, max
-    grouped_t<stream_t>, // No terminal.,
+    grouped_t<stream_t>, // No terminal.
     exc_t // Don't re-order (we don't want this to initialize to an error.)
     > result_t;
 
@@ -317,14 +295,6 @@ typedef boost::variant<map_wire_func_t,
                        zip_wire_func_t
                        > transform_variant_t;
 
-typedef boost::variant<count_wire_func_t,
-                       sum_wire_func_t,
-                       avg_wire_func_t,
-                       min_wire_func_t,
-                       max_wire_func_t,
-                       reduce_wire_func_t
-                       > terminal_variant_t;
-
 class op_t {
 public:
     op_t() { }
@@ -335,6 +305,25 @@ public:
                             const datum_t &sindex_val) = 0;
 };
 
+struct limit_read_t {
+    is_primary_t is_primary;
+    size_t n;
+    sorting_t sorting;
+    std::vector<scoped_ptr_t<op_t> > *ops;
+};
+// Note that this is serializable because it goes in a serializable variant, but
+// it is a runtime error to serialize it.
+RDB_DECLARE_SERIALIZABLE(limit_read_t);
+
+typedef boost::variant<count_wire_func_t,
+                       sum_wire_func_t,
+                       avg_wire_func_t,
+                       min_wire_func_t,
+                       max_wire_func_t,
+                       reduce_wire_func_t,
+                       limit_read_t
+                       > terminal_variant_t;
+
 class accumulator_t {
 public:
     accumulator_t();
@@ -342,11 +331,11 @@ public:
     // May be overridden as an optimization (currently is for `count`).
     virtual bool uses_val() { return true; }
     virtual bool should_send_batch() = 0;
-    virtual done_traversing_t operator()(env_t *env,
-                                         groups_t *groups,
-                                         const store_key_t &key,
-                                         // sindex_val may be NULL
-                                         const datum_t &sindex_val) = 0;
+    virtual continue_bool_t operator()(env_t *env,
+                                       groups_t *groups,
+                                       const store_key_t &key,
+                                       // sindex_val may be NULL
+                                       const datum_t &sindex_val) = 0;
     virtual void finish(result_t *out);
     virtual void unshard(env_t *env,
                          const store_key_t &last_key,
@@ -365,17 +354,16 @@ public:
     virtual void operator()(env_t *env, groups_t *groups) = 0;
     virtual void add_res(env_t *env, result_t *res) = 0;
     virtual scoped_ptr_t<val_t> finish_eager(
-        protob_t<const Backtrace> bt, bool is_grouped,
+        backtrace_id_t bt, bool is_grouped,
         const ql::configured_limits_t &limits) = 0;
 };
 
 scoped_ptr_t<accumulator_t> make_append(const sorting_t &sorting, batcher_t *batcher);
 //                                                        NULL if unsharding ^^^^^^^
+scoped_ptr_t<accumulator_t> make_limit_append(size_t n, sorting_t sorting);
 scoped_ptr_t<accumulator_t> make_terminal(const terminal_variant_t &t);
-
-scoped_ptr_t<eager_acc_t> make_to_array(reql_version_t reql_version);
+scoped_ptr_t<eager_acc_t> make_to_array();
 scoped_ptr_t<eager_acc_t> make_eager_terminal(const terminal_variant_t &t);
-
 scoped_ptr_t<op_t> make_op(const transform_variant_t &tv);
 
 } // namespace ql

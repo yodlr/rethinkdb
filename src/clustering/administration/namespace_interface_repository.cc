@@ -5,11 +5,9 @@
 #include <boost/bind.hpp>
 
 #include "arch/timing.hpp"
-#include "clustering/administration/namespace_metadata.hpp"
-#include "clustering/reactor/namespace_interface.hpp"
+#include "clustering/query_routing/table_query_client.hpp"
 #include "concurrency/cross_thread_signal.hpp"
 #include "concurrency/cross_thread_watchable.hpp"
-#include "rdb_protocol/wait_for_readiness.hpp"
 
 #define NAMESPACE_INTERFACE_EXPIRATION_MS (60 * 1000)
 
@@ -50,129 +48,95 @@ public:
 
 namespace_repo_t::namespace_repo_t(
         mailbox_manager_t *_mailbox_manager,
-        const boost::shared_ptr<semilattice_read_view_t<
-            cow_ptr_t<namespaces_semilattice_metadata_t> > > &semilattice_view,
-        watchable_map_t<std::pair<peer_id_t, namespace_id_t>,
-                        namespace_directory_metadata_t> *_directory,
+        watchable_map_t<directory_key_t, table_query_bcard_t> *_directory,
         rdb_context_t *_ctx)
     : mailbox_manager(_mailbox_manager),
-      namespaces_view(semilattice_view),
       directory(_directory),
-      ctx(_ctx),
-      namespaces_subscription(boost::bind(&namespace_repo_t::on_namespaces_change, this, drainer.lock()))
-{
-    namespaces_subscription.reset(namespaces_view);
-}
+      ctx(_ctx)
+      { }
 
 namespace_repo_t::~namespace_repo_t() { }
 
 void copy_region_maps_to_thread(
-        const std::map<namespace_id_t, std::map<key_range_t, machine_id_t> > &from,
-        one_per_thread_t<std::map<namespace_id_t, std::map<key_range_t, machine_id_t> > > *to,
+        const std::map<namespace_id_t, std::map<key_range_t, server_id_t> > &from,
+        one_per_thread_t<std::map<namespace_id_t, std::map<key_range_t, server_id_t> > > *to,
         int thread, UNUSED auto_drainer_t::lock_t keepalive) {
     on_thread_t th((threadnum_t(thread)));
     *to->get() = from;
 }
 
-void namespace_repo_t::on_namespaces_change(auto_drainer_t::lock_t keepalive) {
-    ASSERT_NO_CORO_WAITING;
-    std::map<namespace_id_t, std::map<key_range_t, machine_id_t> > new_reg_to_pri_maps;
-
-    namespaces_semilattice_metadata_t::namespace_map_t::const_iterator it;
-    const namespaces_semilattice_metadata_t::namespace_map_t &ns = namespaces_view.get()->get().get()->namespaces;
-    for (it = ns.begin(); it != ns.end(); ++it) {
-        if (it->second.is_deleted()) {
-            continue;
-        }
-        table_replication_info_t info = it->second.get_ref().replication_info.get_ref();
-        for (size_t i = 0; i < info.config.shards.size(); ++i) {
-            /* RSI(reql_admin): This should be set to the machine ID of the director for
-            the shard, rather than to `nil_uuid()`. We could compute the machine ID by
-            looking it up in the `server_name_client`. But it's likely that we'll soon
-            store the machine ID directly instead of the name, so it's less effort to
-            just fix this once that change has been implemented. */
-            new_reg_to_pri_maps[it->first][info.shard_scheme.get_shard_range(i)] =
-                nil_uuid();
-        }
-    }
-
-    for (int thread = 0; thread < get_num_threads(); ++thread) {
-        coro_t::spawn_ordered(std::bind(&copy_region_maps_to_thread,
-                                        new_reg_to_pri_maps,
-                                        &region_to_primary_maps,
-                                        thread,
-                                        keepalive));
-    }
-}
-
 void namespace_repo_t::create_and_destroy_namespace_interface(
             namespace_cache_t *cache,
-            const uuid_u &namespace_id,
+            const namespace_id_t &table_id,
             auto_drainer_t::lock_t keepalive)
-            THROWS_NOTHING{
+            THROWS_NOTHING {
     keepalive.assert_is_holding(&cache->drainer);
     threadnum_t thread = get_thread_id();
 
-    namespace_cache_entry_t *cache_entry = cache->entries.find(namespace_id)->second.get();
+    namespace_cache_entry_t *cache_entry =
+        cache->entries.find(table_id)->second.get();
     guarantee(!cache_entry->namespace_interface.get_ready_signal()->is_pulsed());
 
-    /* We need to switch to `home_thread()` to construct `cross_thread_watchable`, then
-    switch back. In destruction we need to do the reverse. Fortunately RAII works really
-    nicely here. */
+    /* We want to extract the entries in the directory that are for this table. This is
+    the job of `table_directory_converter_t`. Since `directory` is thread-local, we have
+    to construct it on the home thread. So we switch to the home thread, construct it and
+    a `cross_thread_watchable_map_var_t`, then switch back. When the destructors are
+    called, we do the same in reverse, making good use of RAII. */
     on_thread_t switch_to_home_thread(home_thread());
-    class picker_watchable_map_t :
+    class table_directory_converter_t :
         public watchable_map_transform_t<
-            std::pair<peer_id_t, namespace_id_t>,
-            namespace_directory_metadata_t,
-            peer_id_t,
-            namespace_directory_metadata_t>
-    {
+            directory_key_t, table_query_bcard_t,
+            std::pair<peer_id_t, uuid_u>, table_query_bcard_t> {
     public:
-        picker_watchable_map_t(
-                watchable_map_t<std::pair<peer_id_t, namespace_id_t>,
-                                namespace_directory_metadata_t> *_directory,
-                namespace_id_t _namespace_id) :
+        table_directory_converter_t(
+                watchable_map_t<directory_key_t, table_query_bcard_t> *_directory,
+                const namespace_id_t &_table_id) :
             watchable_map_transform_t(_directory),
-            nid(_namespace_id) { }
-        bool key_1_to_2(const std::pair<peer_id_t, namespace_id_t> &key1,
-                        peer_id_t *key2_out) {
-            if (key1.second == nid) {
-                *key2_out = key1.first;
+            table_id(_table_id)
+            { }
+        bool key_1_to_2(
+                const directory_key_t &key1,
+                std::pair<peer_id_t, uuid_u> *key2_out) {
+            if (key1.second.first == table_id) {
+                key2_out->first = key1.first;
+                key2_out->second = key1.second.second;
                 return true;
             } else {
                 return false;
             }
         }
-        void value_1_to_2(const namespace_directory_metadata_t *value1,
-                          const namespace_directory_metadata_t **value2_out) {
+        void value_1_to_2(
+                const table_query_bcard_t *value1,
+                const table_query_bcard_t **value2_out) {
             *value2_out = value1;
         }
-        bool key_2_to_1(const peer_id_t &key2,
-                        std::pair<peer_id_t, namespace_id_t> *key1_out) {
-            key1_out->first = key2;
-            key1_out->second = nid;
+        bool key_2_to_1(
+                const std::pair<peer_id_t, uuid_u> &key2,
+                directory_key_t *key1_out) {
+            key1_out->first = key2.first;
+            key1_out->second.first = table_id;
+            key1_out->second.second = key2.second;
             return true;
         }
-        namespace_id_t nid;
-    } picker(directory, namespace_id);
-    cross_thread_watchable_map_var_t<peer_id_t, namespace_directory_metadata_t>
-        cross_thread_watchable(&picker, thread);
+    private:
+        namespace_id_t table_id;
+    } directory_converter_on_home_thread(directory, table_id);
+    cross_thread_watchable_map_var_t<std::pair<peer_id_t, uuid_u>, table_query_bcard_t>
+        directory_converter_on_this_thread(&directory_converter_on_home_thread, thread);
     on_thread_t switch_back(thread);
 
-    cluster_namespace_interface_t namespace_interface(
+    table_query_client_t query_client(
         mailbox_manager,
-        region_to_primary_maps.get(),
-        cross_thread_watchable.get_watchable(),
-        namespace_id,
+        directory_converter_on_this_thread.get_watchable(),
         ctx);
 
     try {
         /* Wait for the table to become available for use */
-        wait_interruptible(namespace_interface.get_initial_ready_signal(),
+        wait_interruptible(query_client.get_initial_ready_signal(),
             keepalive.get_drain_signal());
 
-        /* Give the outside world access to `namespace_interface` */
-        cache_entry->namespace_interface.pulse(&namespace_interface);
+        /* Give the outside world access to `query_client` */
+        cache_entry->namespace_interface.pulse(&query_client);
 
         /* Wait until it's time to shut down */
         while (true) {
@@ -207,7 +171,7 @@ void namespace_repo_t::create_and_destroy_namespace_interface(
     }
 
     ASSERT_NO_CORO_WAITING;
-    cache->entries.erase(namespace_id);
+    cache->entries.erase(table_id);
 }
 
 namespace_interface_access_t namespace_repo_t::get_namespace_interface(

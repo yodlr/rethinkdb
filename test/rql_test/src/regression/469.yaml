@@ -2,21 +2,17 @@ desc: Issue #469: add pkey term
 tests:
 
   - cd: r.db_create('d469')
-    ot: ({'created':1})
+    ot: partial({'dbs_created':1})
   - cd: r.db('d469').table_create('t469')
-    ot: ({'created':1})
+    ot: partial({'tables_created':1})
   - cd: r.db('d469').table('t469').index_create('x')
     ot: ({'created':1})
   - cd: r.db('d469').table('t469').index_wait('x').pluck('index', 'ready')
     ot: ([{'ready':True, 'index':'x'}])
 
-  - rb: r(nil).info
-    py: r.expr(None).info()
-    js: r(null).info()
-    ot:
-      rb: ({'type':'NULL','value':'nu''ll'})
-      py: ({'type':'NULL','value':'null'})
-      js: ({'type':'NULL','value':'null'})
+  - cd: r(null).info()
+    py: r.expr(null).info()
+    ot: ({'type':'NULL','value':'null'})
   - rb: r(true).info
     py: r.expr(True).info()
     js: r(true).info()
@@ -32,27 +28,29 @@ tests:
   - rb: r([1]).info
     py: r.expr([1]).info()
     js: r([1]).info()
-    ot: ({'type':'ARRAY','value':'[1]'})
+    ot: ({'type':'ARRAY','value':"[\n\t1\n]"})
   - rb: r({:a => 1}).info
     py: r.expr({'a':1}).info()
     js: r({a:1}).info()
     ot: ({'type':'OBJECT','value':"{\n\t\"a\":\t1\n}"})
 
   - cd: r.db('d469').info()
-    ot: ({'type':'DB','name':'d469'})
+    ot: partial({'type':'DB','name':'d469'})
   - cd: r.db('d469').table('t469').info()
-    ot: ({'type':'TABLE','name':'t469','db':{'type':'DB','name':'d469'},
-          'primary_key':'id', 'indexes':['x']})
+    ot: ({'type':'TABLE','name':'t469','id':uuid(),
+          'db':{'type':'DB','name':'d469','id':uuid()},
+          'primary_key':'id', 'indexes':['x'], 'doc_count_estimates':[0]})
   - rb: r.db('d469').table('t469').filter{true}.info
     py: r.db('d469').table('t469').filter(lambda x:True).info()
     js: r.db('d469').table('t469').filter(function(x) { return true; }).info()
     ot: ({'type':'SELECTION<STREAM>',
-          'table':{'type':'TABLE','name':'t469','db':{'type':'DB','name':'d469'},
-                   'primary_key':'id', 'indexes':['x']}})
+          'table':{'type':'TABLE','name':'t469','id':uuid(),
+                   'db':{'type':'DB','name':'d469','id':uuid()},
+                   'primary_key':'id', 'indexes':['x'], 'doc_count_estimates':[0]}})
   - rb: r.db('d469').table('t469').map{|x| 1}.info
     py: r.db('d469').table('t469').map(lambda x:1).info()
     js: r.db('d469').table('t469').map(function(x) { return 1; }).info()
     ot: ({'type':'STREAM'})
 
   - cd: r.db_drop('d469')
-    ot: ({'dropped':1})
+    ot: partial({'dbs_dropped':1})

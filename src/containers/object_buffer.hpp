@@ -67,6 +67,10 @@ public:
         return reinterpret_cast<const T *>(&object_data[0]);
     }
 
+    const T *operator->() const {
+        return get();
+    }
+
     void reset() {
         T *obj_ptr = get();
         state = DESTRUCTING;
@@ -79,9 +83,9 @@ public:
     }
 
 private:
-    // We're going more for a high probability of good alignment than
-    // proof of good alignment.
-    char object_data[sizeof(T)];
+    // Force alignment of the data to the alignment of the templatized type,
+    // this avoids some optimization errors, see github issue #3300 for an example.
+    char object_data[sizeof(T)] __attribute__((aligned(alignof(T))));
 
     enum buffer_state_t {
         EMPTY,

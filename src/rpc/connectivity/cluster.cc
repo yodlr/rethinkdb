@@ -24,13 +24,13 @@
 #include "utils.hpp"
 
 // Number of messages after which the message handling loop yields
-#define MESSAGE_HANDLER_MAX_BATCH_SIZE           8
+#define MESSAGE_HANDLER_MAX_BATCH_SIZE           16
 
 // The cluster communication protocol version.
-static_assert(cluster_version_t::CLUSTER == cluster_version_t::v1_15_is_latest,
+static_assert(cluster_version_t::CLUSTER == cluster_version_t::v2_1_is_latest,
               "We need to update CLUSTER_VERSION_STRING when we add a new cluster "
               "version.");
-#define CLUSTER_VERSION_STRING "1.15"
+#define CLUSTER_VERSION_STRING "2.1.0"
 
 const std::string connectivity_cluster_t::cluster_proto_header("RethinkDB cluster\n");
 const std::string connectivity_cluster_t::cluster_version_string(CLUSTER_VERSION_STRING);
@@ -126,10 +126,20 @@ void connectivity_cluster_t::connection_t::kill_connection() {
 }
 
 connectivity_cluster_t::connection_t::connection_t(run_t *p,
-                                              peer_id_t id,
-                                              keepalive_tcp_conn_stream_t *c,
-                                              const peer_address_t &a) THROWS_NOTHING :
-    conn(c), peer_address(a),
+                                                   peer_id_t id,
+                                                   keepalive_tcp_conn_stream_t *c,
+                                                   const peer_address_t &a) THROWS_NOTHING :
+    conn(c),
+    peer_address(a),
+    flusher([&](signal_t *) {
+        guarantee(this->conn != nullptr);
+        // We need to acquire the send_mutex because flushing the buffer
+        // must not interleave with other writes (restriction of linux_tcp_conn_t).
+        mutex_t::acq_t acq(&this->send_mutex);
+        // We ignore the return value of flush_buffer(). Closed connections
+        // must be handled elsewhere.
+        this->conn->flush_buffer();
+    }, 1),
     pm_collection(),
     pm_bytes_sent(secs_to_ticks(1), true),
     pm_collection_membership(&p->parent->connectivity_collection, &pm_collection,
@@ -140,15 +150,9 @@ connectivity_cluster_t::connection_t::connection_t(run_t *p,
 {
     pmap(get_num_threads(), [this](int thread_id) {
         on_thread_t thread_switcher((threadnum_t(thread_id)));
-        parent->parent->connections.get()->apply_atomic_op(
-            [&](connection_map_t *value) -> bool {
-                auto res = value->insert(std::make_pair(
-                    peer_id,
-                    std::make_pair(this, auto_drainer_t::lock_t(drainers.get()))
-                    ));
-                guarantee(res.second, "Somehow we tried to insert a duplicate entry.");
-                return true;
-            });
+        parent->parent->connections.get()->set_key_no_equals(
+            peer_id,
+            std::make_pair(this, auto_drainer_t::lock_t(drainers.get())));
     });
 }
 
@@ -156,13 +160,7 @@ connectivity_cluster_t::connection_t::~connection_t() THROWS_NOTHING {
     // Drain out any users
     pmap(get_num_threads(), [this](int thread_id) {
         on_thread_t thread_switcher((threadnum_t(thread_id)));
-        parent->parent->connections.get()->apply_atomic_op(
-            [&](connection_map_t *value) -> bool {
-                auto it = value->find(peer_id);
-                guarantee(it != value->end() && it->second.first == this);
-                value->erase(it);
-                return true;
-            });
+        parent->parent->connections.get()->delete_key(peer_id);
         drainers.get()->drain();
     });
 
@@ -191,7 +189,8 @@ static peer_address_t our_peer_address(std::set<ip_address_t> local_addresses,
     } else {
         // Otherwise we need to use the local addresses with the cluster port
         if (local_addresses.empty()) {
-            local_addresses = get_local_ips(std::set<ip_address_t>(), true);
+            local_addresses = get_local_ips(std::set<ip_address_t>(),
+                                            local_ip_filter_t::ALL);
         }
         for (auto it = local_addresses.begin();
              it != local_addresses.end(); ++it) {
@@ -253,9 +252,9 @@ connectivity_cluster_t::run_t::~run_t() {
     */
 }
 
-std::set<ip_and_port_t> connectivity_cluster_t::run_t::get_ips() const {
+std::set<host_and_port_t> connectivity_cluster_t::run_t::get_canonical_addresses() {
     parent->assert_thread();
-    return routing_table.at(parent->me).ips();
+    return routing_table.at(parent->me).hosts();
 }
 
 int connectivity_cluster_t::run_t::get_port() {
@@ -463,7 +462,7 @@ public:
     }
     void write(write_stream_t *) {
         /* Do nothing. The cluster will end up sending just the tag 'H' with no message
-        attached, which will trigger `keepalive_read()` on the remote machine. */
+        attached, which will trigger `keepalive_read()` on the remote server. */
     }
     connectivity_cluster_t::connection_t *connection;
     auto_drainer_t::lock_t connection_keepalive;
@@ -756,9 +755,9 @@ void connectivity_cluster_t::run_t::handle(
     `conn_closer_2`. */
 
     // Get the name of our peer, for error reporting.
-    ip_address_t peer_addr;
+    ip_and_port_t peer_addr;
     std::string peerstr = "(unknown)";
-    if (!conn->get_underlying_conn()->getpeername(&peer_addr))
+    if (conn->get_underlying_conn()->getpeername(&peer_addr))
         peerstr = peer_addr.to_string();
     const char *peername = peerstr.c_str();
 
@@ -937,7 +936,7 @@ void connectivity_cluster_t::run_t::handle(
     }
     if (expected_id && other_id != *expected_id) {
         // This is only a problem if we're not using a loopback address
-        if (!peer_addr.is_loopback()) {
+        if (!peer_addr.ip().is_loopback()) {
             logERR("Received inconsistent routing information (wrong ID) from %s, "
                    "closing connection.", peername);
         }
@@ -961,8 +960,8 @@ void connectivity_cluster_t::run_t::handle(
     parent->assert_thread();
 
     /* The trickiest case is when there are two or more parallel connections
-    that are trying to be established between the same two machines. We can get
-    this when e.g. machine A and machine B try to connect to each other at the
+    that are trying to be established between the same two servers. We can get
+    this when e.g. server A and server B try to connect to each other at the
     same time. It's important that exactly one of the connections actually gets
     established. When there are multiple connections trying to be established,
     this is referred to as a "conflict". */
@@ -1093,7 +1092,7 @@ void connectivity_cluster_t::run_t::handle(
         connection_t conn_structure(this, other_id, conn, *other_peer_addr.get());
 
         /* `heartbeat_manager` will periodically send a heartbeat message to
-        other machines, and it will also close the connection if we don't
+        other servers, and it will also close the connection if we don't
         receive anything for a while. */
         heartbeat_manager_t heartbeat_manager(
             &conn_structure,
@@ -1153,7 +1152,6 @@ void connectivity_cluster_t::run_t::handle(
 
 connectivity_cluster_t::connectivity_cluster_t() THROWS_NOTHING :
     me(peer_id_t(generate_uuid())),
-    connections(connection_map_t()),
     current_run(NULL),
     connectivity_collection(),
     stats_membership(&get_global_perfmon_collection(), &connectivity_collection, "connectivity")
@@ -1171,22 +1169,21 @@ peer_id_t connectivity_cluster_t::get_me() THROWS_NOTHING {
     return me;
 }
 
-clone_ptr_t<watchable_t<connectivity_cluster_t::connection_map_t> >
+watchable_map_t<peer_id_t, connectivity_cluster_t::connection_pair_t> *
 connectivity_cluster_t::get_connections() THROWS_NOTHING {
-    return connections.get()->get_watchable();
+    return connections.get();
 }
 
 connectivity_cluster_t::connection_t *connectivity_cluster_t::get_connection(
         peer_id_t peer_id, auto_drainer_t::lock_t *keepalive_out) THROWS_NOTHING {
     connectivity_cluster_t::connection_t *conn;
-    connections.get()->apply_read(
-        [&](const connection_map_t *value) {
-            auto it = value->find(peer_id);
-            if (it == value->end()) {
-                conn = NULL;
+    connections.get()->read_key(peer_id,
+        [&](const connection_pair_t *value) {
+            if (value == nullptr) {
+                conn = nullptr;
             } else {
-                conn = it->second.first;
-                *keepalive_out = it->second.second;
+                conn = value->first;
+                *keepalive_out = value->second;
             }
         });
     return conn;
@@ -1246,42 +1243,57 @@ void connectivity_cluster_t::send_message(connection_t *connection,
 
         /* Acquire the send-mutex so we don't collide with other things trying
         to send on the same connection. */
-        mutex_t::acq_t acq(&connection->send_mutex);
-
-        /* Write the tag to the network */
         {
-            // All cluster versions use a uint8_t tag here.
-            write_message_t wm;
-            static_assert(std::is_same<message_tag_t, uint8_t>::value,
-                          "We expect to be serializing a uint8_t -- if this has "
-                          "changed, the cluster communication format has changed and "
-                          "you need to ask yourself whether live cluster upgrades work."
-                          );
-            serialize_universal(&wm, tag);
-            int res = send_write_message(connection->conn, &wm);
-            if (res == -1) {
-                if (connection->conn->is_read_open()) {
-                    connection->conn->shutdown_read();
-                }
-                return;
-            }
-        }
+            /* The `true` is for eager waiting, which is a significant performance
+            optimization in this case. */
+            mutex_t::acq_t acq(&connection->send_mutex, true);
 
-        /* Write the message itself to the network */
-        {
-            int64_t res = connection->conn->write(buffer.vector().data(),
-                                                  buffer.vector().size());
-            if (res == -1) {
-                /* Close the other half of the connection to make sure that
-                   `connectivity_cluster_t::run_t::handle()` notices that something is
-                   up */
-                if (connection->conn->is_read_open()) {
-                    connection->conn->shutdown_read();
+            /* Write the tag to the network */
+            {
+                // All cluster versions use a uint8_t tag here.
+                write_message_t wm;
+                static_assert(std::is_same<message_tag_t, uint8_t>::value,
+                              "We expect to be serializing a uint8_t -- if this has "
+                              "changed, the cluster communication format has changed and "
+                              "you need to ask yourself whether live cluster upgrades work."
+                              );
+                serialize_universal(&wm, tag);
+                make_buffered_tcp_conn_stream_wrapper_t buffered_conn(connection->conn);
+                int res = send_write_message(&buffered_conn, &wm);
+                if (res == -1) {
+                    /* Close the other half of the connection to make sure that
+                       `connectivity_cluster_t::run_t::handle()` notices that something is
+                       up */
+                    if (connection->conn->is_read_open()) {
+                        connection->conn->shutdown_read();
+                    }
+                    return;
                 }
-                return;
-            } else {
-                guarantee(res == static_cast<int64_t>(buffer.vector().size()));
             }
+
+            /* Write the message itself to the network */
+            {
+                int64_t res = connection->conn->write_buffered(buffer.vector().data(),
+                                                               buffer.vector().size());
+                if (res == -1) {
+                    if (connection->conn->is_read_open()) {
+                        connection->conn->shutdown_read();
+                    }
+                    return;
+                } else {
+                    guarantee(res == static_cast<int64_t>(buffer.vector().size()));
+                }
+            }
+        } /* Releases the send_mutex */
+
+        connection->flusher.notify();
+        cond_t dummy_interruptor;
+        connection->flusher.flush(&dummy_interruptor);
+        if (!connection->conn->is_write_open()) {
+            if (connection->conn->is_read_open()) {
+                connection->conn->shutdown_read();
+            }
+            return;
         }
     }
 

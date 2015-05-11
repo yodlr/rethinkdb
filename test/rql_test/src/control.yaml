@@ -1,11 +1,6 @@
 desc: Tests RQL control flow structures
-table_variable_name: tbl
+table_variable_name: tbl, tbl2
 tests:
-
-    # Setup a second table
-    - cd: r.db('test').table_create('test2')
-      ot: ({'created':1})
-      def: tbl2 = r.db('test').table('test2')
 
     ## FunCall
 
@@ -276,12 +271,18 @@ tests:
     - cd: r.expr([1, 2]).map(r.db('test').table_create('nested_table'))
       ot: err('RqlCompileError', 'Cannot nest writes or meta ops in stream operations.  Use FOR_EACH instead.', [0])
 
-    - cd: r.expr(1).do(r.db('test').table_create('nested_table'))
-      ot: ({'created':1})
+    - cd: r.expr([1, 2]).map(r.db('test').table_create('nested_table'))
+      ot: err('RqlCompileError', 'Cannot nest writes or meta ops in stream operations.  Use FOR_EACH instead.', [0])
 
-    # Cleanup
-    - cd: r.db('test').table_drop('test2')
-      ot: ({'dropped':1})
+    - cd: r.expr([1, 2]).map(tbl.insert({'foo':r.row}).get_field('inserted'))
+      rb: r.expr([1, 2]).map{|x| tbl.insert({'foo':x}).get_field('inserted')}
+      ot: err('RqlCompileError', 'Cannot nest writes or meta ops in stream operations.  Use FOR_EACH instead.', [0])
+
+    - cd: r.expr([1, 2]).map(tbl.insert({'foo':r.row}).get_field('inserted').add(5))
+      rb: r.expr([1, 2]).map{|x| tbl.insert({'foo':x}).get_field('inserted').add(5)}
+      ot: err('RqlCompileError', 'Cannot nest writes or meta ops in stream operations.  Use FOR_EACH instead.', [0])
+
+    - cd: r.expr(1).do(r.db('test').table_create('nested_table'))
+      ot: partial({'tables_created':1})
 
     - cd: r.db('test').table_drop('nested_table')
-      ot: ({'dropped':1})

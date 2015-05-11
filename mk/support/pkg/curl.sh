@@ -1,5 +1,5 @@
 
-version=7.36.0
+version=7.40.0
 
 src_url=http://curl.haxx.se/download/curl-$version.tar.bz2
 
@@ -11,7 +11,10 @@ pkg_configure () {
     if [[ "$OS" = "Darwin" ]]; then
         sslCommand="--with-darwinssl --without-ssl"
     fi
-    in_dir "$build_dir" ./configure --prefix="$prefix" --without-gnutls $ssl_command --without-librtmp --disable-ldap --disable-shared
+    if [[ "$CROSS_COMPILING" = 1 ]]; then
+        configure_flags="--host=$($CXX -dumpmachine)"
+    fi
+    in_dir "$build_dir" ./configure --prefix="$prefix" --without-gnutls $ssl_command --without-librtmp --disable-ldap --disable-shared ${configure_flags:-}
 }
 
 pkg_install-include () {
@@ -22,6 +25,7 @@ pkg_install-include () {
 
 pkg_install () {
     pkg_copy_src_to_build
+
     pkg_configure
 
     # install the libraries

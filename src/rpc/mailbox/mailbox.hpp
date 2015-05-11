@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "backtrace.hpp"
 #include "concurrency/new_semaphore.hpp"
 #include "containers/archive/archive.hpp"
 #include "containers/archive/vector_stream.hpp"
@@ -41,6 +42,10 @@ struct raw_mailbox_t : public home_thread_mixin_t {
 public:
     struct address_t;
     typedef uint64_t id_t;
+
+#ifndef NDEBUG
+    lazy_backtrace_formatter_t bt;
+#endif
 
 private:
     friend class mailbox_manager_t;
@@ -87,7 +92,7 @@ public:
 
         RDB_MAKE_ME_EQUALITY_COMPARABLE_3(raw_mailbox_t::address_t, peer, thread, mailbox_id);
 
-        RDB_MAKE_ME_SERIALIZABLE_3(peer, thread, mailbox_id);
+        RDB_MAKE_ME_SERIALIZABLE_3(address_t, peer, thread, mailbox_id);
 
     private:
         friend void send(mailbox_manager_t *, raw_mailbox_t::address_t, mailbox_write_callback_t *callback);
@@ -117,10 +122,8 @@ public:
     address_t get_address() const;
 };
 
-RDB_SERIALIZE_OUTSIDE(raw_mailbox_t::address_t);
-
 /* `send()` sends a message to a mailbox. `send()` can block and must be called
-in a coroutine. If the mailbox does not exist or the peer is inaccessible, `send()`
+in a coroutine. If the mailbox does not exist or the peer is disconnected, `send()`
 will silently fail. */
 
 void send(mailbox_manager_t *src,

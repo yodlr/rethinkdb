@@ -7,6 +7,7 @@
 #include <boost/optional.hpp>
 #include <boost/variant.hpp>
 
+#include "concurrency/watchable_map.hpp"
 #include "containers/archive/archive.hpp"
 #include "containers/archive/varint.hpp"
 
@@ -28,7 +29,7 @@ struct variant_serializer_t;
 template <cluster_version_t W, int N, class... Ts>
 struct variant_serializer_t<W, N, boost::detail::variant::void_, Ts...> : public variant_serializer_t<W, N> {
 
-    variant_serializer_t(write_message_t *wm)
+    explicit variant_serializer_t(write_message_t *wm)
         : variant_serializer_t<W, N>(wm) { }
 
     using variant_serializer_t<W, N>::operator();
@@ -37,7 +38,7 @@ struct variant_serializer_t<W, N, boost::detail::variant::void_, Ts...> : public
 template <cluster_version_t W, int N, class T, class... Ts>
 struct variant_serializer_t<W, N, T, Ts...> : public variant_serializer_t<W, N + 1, Ts...> {
 
-    variant_serializer_t(write_message_t *wm)
+    explicit variant_serializer_t(write_message_t *wm)
         : variant_serializer_t<W, N + 1, Ts...>(wm) { }
 
     using variant_serializer_t<W, N + 1, Ts...>::operator();
@@ -56,7 +57,7 @@ template <cluster_version_t W, int N>
 struct variant_serializer_t<W, N> {
     struct end_of_variant { };
 
-    variant_serializer_t(write_message_t *wm) : wm_(wm) { }
+    explicit variant_serializer_t(write_message_t *wm) : wm_(wm) { }
 
     void operator()(const end_of_variant&){
         unreachable();
@@ -145,4 +146,14 @@ MUST_USE archive_result_t deserialize(read_stream_t *s, boost::optional<T> *x) {
     }
 }
 
+/* This isn't a Boost type, but there's not really a better place to put it. */
+
+template <cluster_version_t W>
+void serialize(write_message_t *, const empty_value_t &) {
+}
+
+template <cluster_version_t W>
+MUST_USE archive_result_t deserialize(read_stream_t *, empty_value_t *) {
+    return archive_result_t::SUCCESS;
+}
 #endif  // CONTAINERS_ARCHIVE_BOOST_TYPES_HPP_

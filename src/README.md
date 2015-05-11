@@ -39,9 +39,6 @@ B-tree operations on top of buffer caches, btree slice, secondary indexes, etc..
 
 
 ### buffer_cache/
-Typedefs for main buffer classes, buf_lock_t, cache_t, transaction_t, etc..
-
-#### buffer_cache/alt
 Memory page/block eviction, replacement and flush policies, txn and snapshots, etc..
 
 
@@ -50,11 +47,9 @@ Memory page/block eviction, replacement and flush policies, txn and snapshots, e
 Rethink cluster logic, node roles, blueprint implementation, command-line / web backends, etc..
 
 #### clustering/administration
-Implementation of reactor driver/manager, loggers and metadata definitions for namespace,
-database, machine, etc..
-
-##### clustering/administration/cli
-Helper functions to parse commands from command-line interface.
+Implementation of "main"-like function for the server. Glue code to hold together all the
+different components. Logger. Metadata definitions for table, database, server, etc...
+Administrative tools like the system tables.
 
 ##### clustering/administration/http
 HTTP user applications for system log, backfilling progress, etc.
@@ -69,30 +64,31 @@ Rethink server main options and startup functions.
 Throttling mechanism for query processing in a cluster node, uses clustered mailboxes.
 
 #### clustering/immediate_consistency
-Data and shard consistency mechanisms using clustered mailboxes known as business cards.
+Handles assigning timestamps to queries and enforcing consistency.
 
-##### clustering/immediate_consistency/branch
-Read/Write queries are sent to the primary machine of a shard (master_t).
-The master_t forwards them to the brodcaster_t (primary) of that shard.
-The broadcaster_t sorts and distributes them to one or more listener_t,
+Every shard's primary replica has a `broadcaster_t`. Clients send read and write queries
+to the `broadcaster_t` via the types in `clustering/query_routing`. The `broadcaster_t`
+assigns them timestamps and distributes them to the `listener_t`s. Every primary and
+secondary replica has a `listener_t`. The `listener_t` accepts queries from the
+`broadcaster_t` and applies them to the storage engine.
 
-A listener_t is the cluster-facing interface of a replica for a single shard.
-A listener_t performs read/writes to the B-tree.
-A secondary machine is essentially just a listener_t.
+When the `listener_t` is first created, it also takes care of backfilling data from
+another replica and synchronizing the stream of writes from the `broadcaster_t` with the
+backfill it got from the other replica. `replier_t` modifies the behavior of the
+`listener_t` by allowing it to respond to reads as well as writes.
 
-History of table data regions (shards) is identified by a branch ID + timestamp.
-A branch is the DB state when a broadcaster_t was created + sequence of writes.
+The branch history is a collection of metadata that's used to coordinate backfills. A
+"branch" is a sequence of writes all timestamped in order by the same `broadcaster_t`.
+Whenever the primary replica restarts or changes to another server, it creates a new
+branch derived from the earlier branch. This allows the server to reason about divergent
+data.
 
-The replier_t basically is there to wait for the backfilling to complete (from sec to pri),
-and only then it will tell the broadcaster_t that the listener_t can now also
-receive (up-to-date) read requests.
+#### clustering/query_routing
+Handles transferring queries from the parser to replicas. Also takes care of splitting
+queries into parts for different shards.
 
-##### clustering/immediate_consistency/query
-Query processing for each shard.
-A primary machine of a shard has a master_t receiving queries from other nodes.
-
-#### clustering/reactor
-Cluster node functions to match the blueprint. A node role can be primary, secondary or nothing/sleep.
+#### clustering/table_manager
+Uses Raft to coordinate creating/deleting/reconfiguring tables.
 
 
 
@@ -105,7 +101,7 @@ Concurrent queues.
 
 
 ### containers/
-Auth key, blob, bitset, buffer group, list, queue, two-level array, etc. Some are serializable.
+Auth key, blob, buffer group, list, queue, two-level array, etc. Some are serializable.
 
 #### containers/archive
 RDB custom serialization format implementation (e.g. used for cluster node communication).
@@ -121,19 +117,6 @@ HTTP server/parser and request router.
 
 #### http/json
 Custom cJSON wrapper with iterators, etc.
-
-
-
-### memcached/
-Memcached protocol server, parser, etc.. (abandoned and replaced with reql)
-
-#### memcached/memcached_btree
-Memcached wrapper for btree operations.
-
-
-
-### mock/
-Dummy protocol and serializer implementation for testing.
 
 
 

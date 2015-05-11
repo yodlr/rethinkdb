@@ -52,8 +52,6 @@ public:
     void assert_read_mode() const;
     void assert_write_mode() const;
     const std::string &tag() const;
-
-    RDB_DECLARE_ME_SERIALIZABLE;
 #else
     order_token_t() { }
     order_token_t with_read_mode() const { return order_token_t(); }
@@ -82,14 +80,13 @@ private:
     friend class order_sink_t;
     friend class order_checkpoint_t;
     friend class plain_sink_t;
-};
 
 #ifndef NDEBUG
-RDB_SERIALIZE_OUTSIDE(order_token_t);
+    RDB_DECLARE_ME_SERIALIZABLE(order_token_t);
 #else
-RDB_MAKE_SERIALIZABLE_0(order_token_t);
+    RDB_MAKE_ME_SERIALIZABLE_0(order_token_t);
 #endif
-
+};
 
 /* Order sources create order tokens with increasing values for a
    specific bucket. */
@@ -109,6 +106,10 @@ public:
 
     order_token_t check_in(const std::string&) { return order_token_t(); }
 #endif  // ndef NDEBUG
+
+    void rethread(DEBUG_VAR threadnum_t new_thread) {
+        DEBUG_ONLY_CODE(home_thread_mixin_debug_only_t::real_home_thread = new_thread);
+    }
 
 private:
 #ifndef NDEBUG
@@ -140,6 +141,10 @@ public:
     void check_out(UNUSED  order_token_t token) { }
 
 #endif  // ifndef NDEBUG
+
+    void rethread(DEBUG_VAR threadnum_t new_thread) {
+        DEBUG_ONLY_CODE(home_thread_mixin_debug_only_t::real_home_thread = new_thread);
+    }
 
 private:
 

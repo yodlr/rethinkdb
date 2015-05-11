@@ -26,9 +26,9 @@ try:
 except NameError:
     xrange = range
 try:
-    from multiprocessing.queues import SimpleQueue
-except NameError:
     from multiprocessing import SimpleQueue
+except ImportError:
+    from multiprocessing.queues import SimpleQueue
 
 info = "'rethinkdb import` loads data into a RethinkDB cluster"
 usage = "\
@@ -58,6 +58,7 @@ def print_import_help():
     print("  -d [ --directory ] DIR           the directory to import data from")
     print("  -i [ --import ] (DB | DB.TABLE)  limit restore to the given database or table (may")
     print("                                   be specified multiple times)")
+    print("  --no-secondary-indexes           do not create secondary indexes for the imported tables")
     print("")
     print("Import file:")
     print("  -f [ --file ] FILE               the file to import data from")
@@ -107,6 +108,7 @@ def parse_options():
     # Directory import options
     parser.add_option("-d", "--directory", dest="directory", metavar="DIRECTORY", default=None, type="string")
     parser.add_option("-i", "--import", dest="tables", metavar="DB | DB.TABLE", default=[], action="append", type="string")
+    parser.add_option("--no-secondary-indexes", dest="create_sindexes", action="store_false", default=True)
 
     # File import options
     parser.add_option("-f", "--file", dest="import_file", metavar="FILE", default=None, type="string")
@@ -140,6 +142,7 @@ def parse_options():
     res["durability"] = "hard" if options.hard else "soft"
     res["force"] = options.force
     res["debug"] = options.debug
+    res["create_sindexes"] = options.create_sindexes
 
     # Default behavior for csv files - may be changed by options
     res["delimiter"] = ","
@@ -255,15 +258,12 @@ def parse_options():
 # This is called through rdb_call_wrapper so reattempts can be tried as long as progress
 # is being made, but connection errors occur.  We save a failed task in the progress object
 # so it can be resumed later on a new connection.
-def import_from_queue(progress, conn, task_queue, error_queue, replace_conflicts, durability):
-    if progress[0] is None:
-        progress[0] = 0
-        progress.append(None)
-    elif not replace_conflicts:
+def import_from_queue(progress, conn, task_queue, error_queue, replace_conflicts, durability, write_count):
+    if progress[0] is not None and not replace_conflicts:
         # We were interrupted and it's not ok to overwrite rows, check that the batch either:
         # a) does not exist on the server
         # b) is exactly the same on the server
-        task = progress[1]
+        task = progress[0]
         pkey = r.db(task[0]).table(task[1]).info().run(conn)["primary_key"]
         for i in reversed(range(len(task[2]))):
             obj = pickle.loads(task[2][i])
@@ -271,40 +271,45 @@ def import_from_queue(progress, conn, task_queue, error_queue, replace_conflicts
                 raise RuntimeError("Connection error while importing.  Current row has no specified primary key, so cannot guarantee absence of duplicates")
             row = r.db(task[0]).table(task[1]).get(obj[pkey]).run(conn)
             if row == obj:
-                progress[0] += 1
+                write_count[0] += 1
                 del task[2][i]
             else:
                 raise RuntimeError("Duplicate primary key `%s`:\n%s\n%s" % (pkey, str(obj), str(row)))
 
-    task = task_queue.get() if progress[1] is None else progress[1]
-    while len(task) == 3:
+    task = task_queue.get() if progress[0] is None else progress[0]
+    while not isinstance(task, StopIteration):
         try:
             # Unpickle objects (TODO: super inefficient, would be nice if we could pass down json)
             objs = [pickle.loads(obj) for obj in task[2]]
             conflict_action = 'replace' if replace_conflicts else 'error'
             res = r.db(task[0]).table(task[1]).insert(objs, durability=durability, conflict=conflict_action).run(conn)
         except:
-            progress[1] = task
+            progress[0] = task
             raise
 
         if res["errors"] > 0:
             raise RuntimeError("Error when importing into table '%s.%s': %s" %
                                (task[0], task[1], res["first_error"]))
 
-        progress[0] += len(objs)
+        write_count[0] += len(objs)
         task = task_queue.get()
-    return progress[0]
 
 # This is run for each client requested, and accepts tasks from the reader processes
 def client_process(host, port, auth_key, task_queue, error_queue, rows_written, replace_conflicts, durability):
     try:
         conn_fn = lambda: r.connect(host, port, auth_key=auth_key)
-        res = rdb_call_wrapper(conn_fn, "import", import_from_queue, task_queue, error_queue, replace_conflicts, durability)
-        with rows_written.get_lock():
-            rows_written.value += res
+        write_count = [0]
+        rdb_call_wrapper(conn_fn, "import", import_from_queue, task_queue, error_queue, replace_conflicts, durability, write_count)
     except:
         ex_type, ex_class, tb = sys.exc_info()
         error_queue.put((ex_type, ex_class, traceback.extract_tb(tb)))
+
+        # Read until the exit event so the readers do not hang on pushing onto the queue
+        while not isinstance(task_queue.get(), StopIteration):
+            pass
+
+    with rows_written.get_lock():
+        rows_written.value += write_count[0]
 
 batch_length_limit = 200
 batch_size_limit = 500000
@@ -341,22 +346,7 @@ def object_callback(obj, db, table, task_queue, object_buffers, buffer_sizes, fi
     return obj
 
 json_read_chunk_size = 32 * 1024
-json_max_buffer_size = 16 * 1024 * 1024
-
-def read_json_single_object(json_data, file_in, callback):
-    decoder = json.JSONDecoder()
-    while True:
-        try:
-            (obj, offset) = decoder.raw_decode(json_data)
-            json_data = json_data[offset:]
-            callback(obj)
-            break
-        except ValueError:
-            before_len = len(json_data)
-            json_data += file_in.read(json_read_chunk_size)
-            if before_len == len(json_data):
-                raise
-    return json_data
+json_max_buffer_size = 128 * 1024 * 1024
 
 def read_json_array(json_data, file_in, callback, progress_info,
                     json_array=True):
@@ -386,12 +376,13 @@ def read_json_array(json_data, file_in, callback, progress_info,
 
         except (ValueError, IndexError):
             before_len = len(json_data)
-            json_data += file_in.read(json_read_chunk_size)
+            to_read = max(json_read_chunk_size, before_len)
+            json_data += file_in.read(min(to_read, json_max_buffer_size - before_len))
             if json_array and json_data[offset] == ",":
                 offset = json.decoder.WHITESPACE.match(json_data, offset + 1).end()
             elif (not json_array) and before_len == len(json_data):
                 break  # End of JSON
-            elif before_len == len(json_data) or len(json_data) > json_max_buffer_size:
+            elif before_len == len(json_data) or len(json_data) >= json_max_buffer_size:
                 raise
             progress_info[0].value = file_offset
 
@@ -512,10 +503,23 @@ def csv_reader(task_queue, filename, db, table, options, progress_info, exit_eve
         task_queue.put((db, table, object_buffers))
 
 # This function is called through rdb_call_wrapper, which will reattempt if a connection
-# error occurs.  Progress is not used as this will either succeed or fail.
-def create_table(progress, conn, db, table, pkey):
+# error occurs.  Progress will resume where it left off.
+def create_table(progress, conn, db, table, pkey, sindexes):
     if table not in r.db(db).table_list().run(conn):
         r.db(db).table_create(table, primary_key=pkey).run(conn)
+
+    if progress[0] is None:
+        progress[0] = 0
+
+    # Recreate secondary indexes - assume that any indexes that already exist are wrong
+    # and create them from scratch
+    indexes = r.db(db).table(table).index_list().run(conn)
+    for sindex in sindexes[progress[0]:]:
+        if isinstance(sindex, dict) and all(k in sindex for k in ('index', 'function')):
+            if sindex['index'] in indexes:
+                r.db(db).table(table).index_drop(sindex['index']).run(conn)
+            r.db(db).table(table).index_create(sindex['index'], sindex['function']).run(conn)
+        progress[0] += 1
 
 def table_reader(options, file_info, task_queue, error_queue, progress_info, exit_event):
     try:
@@ -524,7 +528,8 @@ def table_reader(options, file_info, task_queue, error_queue, progress_info, exi
         primary_key = file_info["info"]["primary_key"]
 
         conn_fn = lambda: r.connect(options["host"], options["port"], auth_key=options["auth_key"])
-        rdb_call_wrapper(conn_fn, "create table", create_table, db, table, primary_key)
+        rdb_call_wrapper(conn_fn, "create table", create_table, db, table, primary_key,
+                         file_info["info"]["indexes"] if options["create_sindexes"] else [])
 
         if file_info["format"] == "json":
             json_reader(task_queue,
@@ -553,12 +558,6 @@ def abort_import(signum, frame, parent_pid, exit_event, task_queue, clients, int
     if os.getpid() == parent_pid:
         interrupt_event.set()
         exit_event.set()
-
-        alive_clients = sum([client.is_alive() for client in clients])
-        for i in xrange(alive_clients):
-            # TODO: this could theoretically block indefinitely if
-            #   the queue is full and clients aren't reading
-            task_queue.put("exit")
 
 def print_progress(ratio):
     total_width = 40
@@ -626,22 +625,23 @@ def spawn_import_clients(options, files_info):
         while len(reader_procs) > 0:
             time.sleep(0.1)
             # If an error has occurred, exit out early
-            if not error_queue.empty():
+            while not error_queue.empty():
                 exit_event.set()
+                errors.append(error_queue.get())
             reader_procs = [proc for proc in reader_procs if proc.is_alive()]
             update_progress(progress_info)
 
         # Wait for all clients to finish
         alive_clients = sum([client.is_alive() for client in client_procs])
         for i in xrange(alive_clients):
-            task_queue.put("exit")
+            task_queue.put(StopIteration())
 
         while len(client_procs) > 0:
             time.sleep(0.1)
             client_procs = [client for client in client_procs if client.is_alive()]
 
         # If we were successful, make sure 100% progress is reported
-        if error_queue.empty() and not interrupt_event.is_set():
+        if len(errors) == 0 and not interrupt_event.is_set():
             print_progress(1.0)
 
         def plural(num, text):
@@ -657,13 +657,9 @@ def spawn_import_clients(options, files_info):
     if interrupt_event.is_set():
         raise RuntimeError("Interrupted")
 
-    if not task_queue.empty():
-        error_queue.put((RuntimeError, RuntimeError("Error: Items remaining in the task queue"), None))
-
-    if not error_queue.empty():
+    if len(errors) != 0:
         # multiprocessing queues don't handling tracebacks, so they've already been stringified in the queue
-        while not error_queue.empty():
-            error = error_queue.get()
+        for error in errors:
             print("%s" % error[1], file=sys.stderr)
             if options["debug"]:
                 print("%s traceback: %s" % (error[0].__name__, error[2]), file=sys.stderr)
@@ -693,6 +689,8 @@ def tables_check(progress, conn, files_info, force):
     # Ensure that all needed databases exist and tables don't
     db_list = r.db_list().run(conn)
     for db in set([file_info["db"] for file_info in files_info]):
+        if db == "rethinkdb":
+            raise RuntimeError("Error: Cannot import tables into the system database: 'rethinkdb'")
         if db not in db_list:
             r.db_create(db).run(conn)
 
@@ -759,6 +757,9 @@ def import_directory(options):
         db_tables.add((file_info["db"], file_info["table"]))
 
     conn_fn = lambda: r.connect(options["host"], options["port"], auth_key=options["auth_key"])
+    # Make sure this isn't a pre-`reql_admin` cluster - which could result in data loss
+    # if the user has a database named 'rethinkdb'
+    rdb_call_wrapper(conn_fn, "version check", check_minimum_version, (1, 16, 0))
     already_exist = rdb_call_wrapper(conn_fn, "tables check", tables_check, files_info, options["force"])
 
     if len(already_exist) == 1:
@@ -779,6 +780,9 @@ def import_directory(options):
     spawn_import_clients(options, files_info)
 
 def table_check(progress, conn, db, table, pkey, force):
+    if db == "rethinkdb":
+        raise RuntimeError("Error: Cannot import a table into the system database: 'rethinkdb'")
+
     if db not in r.db_list().run(conn):
         r.db_create(db).run(conn)
 
@@ -805,6 +809,9 @@ def import_file(options):
 
     # Ensure that the database and table exist with the right primary key
     conn_fn = lambda: r.connect(options["host"], options["port"], auth_key=options["auth_key"])
+    # Make sure this isn't a pre-`reql_admin` cluster - which could result in data loss
+    # if the user has a database named 'rethinkdb'
+    rdb_call_wrapper(conn_fn, "version check", check_minimum_version, (1, 16, 0))
     pkey = rdb_call_wrapper(conn_fn, "table check", table_check, db, table, pkey, options["force"])
 
     # Make this up so we can use the same interface as with an import directory
@@ -813,7 +820,7 @@ def import_file(options):
     file_info["format"] = options["import_format"]
     file_info["db"] = db
     file_info["table"] = table
-    file_info["info"] = {"primary_key": pkey}
+    file_info["info"] = {"primary_key": pkey, "indexes": []}
 
     spawn_import_clients(options, [file_info])
 

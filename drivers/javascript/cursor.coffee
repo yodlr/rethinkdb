@@ -27,7 +27,7 @@ class IterableResult
 
         @_responses = []
         @_responseIndex = 0
-        @_outstandingRequests = 1 # Because we haven't add the response yet
+        @_outstandingRequests = 1 # Because we haven't added the response yet
         @_iterations = 0
         @_endFlag = false
         @_contFlag = false
@@ -122,8 +122,6 @@ class IterableResult
                 switch response.t
                     when protoResponseType.SUCCESS_PARTIAL
                         @_handleRow()
-                    when protoResponseType.SUCCESS_FEED
-                        @_handleRow()
                     when protoResponseType.SUCCESS_SEQUENCE
                         if response.r.length is 0
                             @_responses.shift()
@@ -148,7 +146,7 @@ class IterableResult
 
     _promptCont: ->
         # Let's ask the server for more data if we haven't already
-        if !@_contFlag && !@_endFlag
+        if (not @_contFlag) and (not @_endFlag) and @_conn.isOpen()
             @_contFlag = true
             @_outstandingRequests += 1
             @_conn._continueQuery(@_token)
@@ -163,35 +161,44 @@ class IterableResult
             @_cbQueue.push cb
             @_promptNext()
 
-        if cb? and typeof cb isnt 'function'
+        if typeof cb is "function"
+            fn(cb)
+        else if cb is undefined
+            p = new Promise (resolve, reject) ->
+                cb = (err, result) ->
+                    if (err)
+                        reject(err)
+                    else
+                        resolve(result)
+                fn(cb)
+            return p
+        else
             throw new err.RqlDriverError "First argument to `next` must be a function or undefined."
-
-        new Promise( (resolve, reject) ->
-            nextCb = (err, result) ->
-                if (err)
-                    reject(err)
-                else
-                    resolve(result)
-            fn(nextCb)
-        ).nodeify cb
 
 
     close: varar 0, 1, (cb) ->
         new Promise( (resolve, reject) =>
             if @_endFlag is true
                 resolve()
-            else
-                @_closeCb = (err) ->
+            else if not @_closeCb?
+                @_closeCb = (err) =>
+                    # Clear all callbacks for outstanding requests
+                    while @_cbQueue.length > 0
+                        @_cbQueue.shift()
+                    # The connection uses _outstandingRequests to see
+                    # if it should remove the token for this
+                    # cursor. This states unambiguously that we don't
+                    # care whatever responses return now.
+                    @_outstandingRequests = 0
                     if (err)
                         reject(err)
                     else
                         resolve()
-
-                if @_outstandingRequests > 0
-                    @_closeAsap = true
-                else
-                    @_outstandingRequests += 1
-                    @_conn._endQuery(@_token)
+                @_closeAsap = true
+                @_outstandingRequests += 1
+                @_conn._endQuery(@_token)
+            else
+                @emit 'error', new err.RqlDriverError "This shouldn't happen"
         ).nodeify cb
 
     _each: varar(1, 2, (cb, onFinished) ->
@@ -252,50 +259,49 @@ class IterableResult
             throw new err.RqlDriverError "You cannot use the cursor interface and the EventEmitter interface at the same time."
 
 
-    addListener: (args...) ->
+    addListener: (event, listener) ->
         if not @emitter?
             @_makeEmitter()
             setImmediate => @_each @_eachCb
-        @emitter.addListener(args...)
+        @emitter.addListener(event, listener)
 
-    on: (args...) ->
+    on: (event, listener) ->
         if not @emitter?
             @_makeEmitter()
             setImmediate => @_each @_eachCb
-        @emitter.on(args...)
+        @emitter.on(event, listener)
 
-
-    once: ->
+    once: (event, listener) ->
         if not @emitter?
             @_makeEmitter()
             setImmediate => @_each @_eachCb
-        @emitter.once(args...)
+        @emitter.once(event, listener)
 
-    removeListener: ->
+    removeListener: (event, listener) ->
         if not @emitter?
             @_makeEmitter()
             setImmediate => @_each @_eachCb
-        @emitter.removeListener(args...)
+        @emitter.removeListener(event, listener)
 
-    removeAllListeners: ->
+    removeAllListeners: (event) ->
         if not @emitter?
             @_makeEmitter()
             setImmediate => @_each @_eachCb
-        @emitter.removeAllListeners(args...)
+        @emitter.removeAllListeners(event)
 
-    setMaxListeners: ->
+    setMaxListeners: (n) ->
         if not @emitter?
             @_makeEmitter()
             setImmediate => @_each @_eachCb
-        @emitter.setMaxListeners(args...)
+        @emitter.setMaxListeners(n)
 
-    listeners: ->
+    listeners: (event) ->
         if not @emitter?
             @_makeEmitter()
             setImmediate => @_each @_eachCb
-        @emitter.listeners(args...)
+        @emitter.listeners(event)
 
-    emit: ->
+    emit: (args...) ->
         if not @emitter?
             @_makeEmitter()
             setImmediate => @_each @_eachCb
@@ -307,8 +313,6 @@ class IterableResult
         else
             @emitter.emit('data', data)
 
-
-
 class Cursor extends IterableResult
     constructor: ->
         @_type = protoResponseType.SUCCESS_PARTIAL
@@ -318,7 +322,7 @@ class Cursor extends IterableResult
 
 class Feed extends IterableResult
     constructor: ->
-        @_type = protoResponseType.SUCCESS_FEED
+        @_type = protoResponseType.SUCCESS_PARTIAL
         super
 
     hasNext: ->
@@ -328,6 +332,41 @@ class Feed extends IterableResult
 
     toString: ar () -> "[object Feed]"
 
+class UnionedFeed extends IterableResult
+    constructor: ->
+        @_type = protoResponseType.SUCCESS_PARTIAL
+        super
+
+    hasNext: ->
+        throw new err.RqlDriverError "`hasNext` is not available for feeds."
+    toArray: ->
+        throw new err.RqlDriverError "`toArray` is not available for feeds."
+
+    toString: ar () -> "[object UnionedFeed]"
+
+class AtomFeed extends IterableResult
+    constructor: ->
+        @_type = protoResponseType.SUCCESS_PARTIAL
+        super
+
+    hasNext: ->
+        throw new err.RqlDriverError "`hasNext` is not available for feeds."
+    toArray: ->
+        throw new err.RqlDriverError "`toArray` is not available for feeds."
+
+    toString: ar () -> "[object AtomFeed]"
+
+class OrderByLimitFeed extends IterableResult
+    constructor: ->
+        @_type = protoResponseType.SUCCESS_PARTIAL
+        super
+
+    hasNext: ->
+        throw new err.RqlDriverError "`hasNext` is not available for feeds."
+    toArray: ->
+        throw new err.RqlDriverError "`toArray` is not available for feeds."
+
+    toString: ar () -> "[object OrderByLimitFeed]"
 
 # Used to wrap array results so they support the same iterable result
 # API as cursors.
@@ -401,4 +440,6 @@ class ArrayResult extends IterableResult
 
 module.exports.Cursor = Cursor
 module.exports.Feed = Feed
+module.exports.AtomFeed = AtomFeed
+module.exports.OrderByLimitFeed = OrderByLimitFeed
 module.exports.makeIterable = ArrayResult::makeIterable

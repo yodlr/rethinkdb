@@ -3,81 +3,106 @@
 
 #include "clustering/administration/datum_adapter.hpp"
 #include "clustering/administration/metadata.hpp"
+#include "clustering/table_manager/table_meta_client.hpp"
 #include "concurrency/cross_thread_signal.hpp"
 
-std::string common_table_artificial_table_backend_t::get_primary_key_name() {
-    return "uuid";
+common_table_artificial_table_backend_t::common_table_artificial_table_backend_t(
+        boost::shared_ptr<semilattice_readwrite_view_t<
+            cluster_semilattice_metadata_t> > _semilattice_view,
+        table_meta_client_t *_table_meta_client,
+        admin_identifier_format_t _identifier_format) :
+    semilattice_view(_semilattice_view),
+    table_meta_client(_table_meta_client),
+    identifier_format(_identifier_format)
+{
+    semilattice_view->assert_thread();
 }
 
-bool common_table_artificial_table_backend_t::read_all_primary_keys(
-        UNUSED signal_t *interruptor,
-        std::vector<ql::datum_t> *keys_out,
-        UNUSED std::string *error_out) {
+std::string common_table_artificial_table_backend_t::get_primary_key_name() {
+    return "id";
+}
+
+bool common_table_artificial_table_backend_t::read_all_rows_as_vector(
+        signal_t *interruptor_on_caller,
+        std::vector<ql::datum_t> *rows_out,
+        std::string *error_out) {
+    cross_thread_signal_t interruptor(interruptor_on_caller, home_thread());
     on_thread_t thread_switcher(home_thread());
-    keys_out->clear();
-    cow_ptr_t<namespaces_semilattice_metadata_t> md = table_sl_view->get();
-    for (auto it = md->namespaces.begin();
-              it != md->namespaces.end();
-            ++it) {
-        if (it->second.is_deleted()) {
-            continue;
+    cluster_semilattice_metadata_t metadata = semilattice_view->get();
+    std::map<namespace_id_t, table_basic_config_t> configs;
+    try {
+        table_meta_client->list_names(&configs);
+        rows_out->clear();
+        for (const auto &pair : configs) {
+            ql::datum_t db_name_or_uuid;
+            if (!convert_database_id_to_datum(
+                    pair.second.database, identifier_format, metadata,
+                    &db_name_or_uuid, nullptr)) {
+                db_name_or_uuid = ql::datum_t("__deleted_database__");
+            }
+            try {
+                ql::datum_t row;
+                format_row(pair.first, pair.second, db_name_or_uuid, &interruptor, &row);
+                rows_out->push_back(row);
+            } catch (const no_such_table_exc_t &) {
+                /* The table got deleted between the call to `list_configs()` and the
+                call to `format_row()`. Ignore it. */
+            }
         }
-        keys_out->push_back(convert_uuid_to_datum(it->first));
+        return true;
+    } catch (const failed_table_op_exc_t &) {
+        *error_out = "Failed to retrieve current configurations for one or more tables "
+            "because the server(s) hosting the table(s) are all unreachable.";
+        return false;
+    } catch (const admin_op_exc_t &msg) {
+        *error_out = msg.what();
+        return false;
     }
-    return true;
 }
 
 bool common_table_artificial_table_backend_t::read_row(
         ql::datum_t primary_key,
-        signal_t *interruptor,
+        signal_t *interruptor_on_caller,
         ql::datum_t *row_out,
         std::string *error_out) {
-    cross_thread_signal_t interruptor2(interruptor, home_thread());
+    cross_thread_signal_t interruptor(interruptor_on_caller, home_thread());
     on_thread_t thread_switcher(home_thread());
-    cow_ptr_t<namespaces_semilattice_metadata_t> md = table_sl_view->get();
+    cluster_semilattice_metadata_t metadata = semilattice_view->get();
     namespace_id_t table_id;
     std::string dummy_error;
     if (!convert_uuid_from_datum(primary_key, &table_id, &dummy_error)) {
         /* If the primary key was not a valid UUID, then it must refer to a nonexistent
         row. */
-        table_id = nil_uuid();
+        *row_out = ql::datum_t();
+        return true;
     }
-    std::map<namespace_id_t, deletable_t<namespace_semilattice_metadata_t> >
-        ::const_iterator it;
-    if (search_const_metadata_by_uuid(&md->namespaces, table_id, &it)) {
-        name_string_t table_name = it->second.get_ref().name.get_ref();
-        name_string_t db_name = get_db_name(it->second.get_ref().database.get_ref());
-        return read_row_impl(table_id, table_name, db_name, it->second.get_ref(),
-                             &interruptor2, row_out, error_out);
-    } else {
+    try {
+        table_basic_config_t basic_config;
+        table_meta_client->get_name(table_id, &basic_config);
+
+        ql::datum_t db_name_or_uuid;
+        name_string_t db_name;
+        if (!convert_database_id_to_datum(basic_config.database, identifier_format,
+                metadata, &db_name_or_uuid, &db_name)) {
+            db_name_or_uuid = ql::datum_t("__deleted_database__");
+            db_name = name_string_t::guarantee_valid("__deleted_database__");
+        }
+
+        try {
+            format_row(table_id, basic_config, db_name_or_uuid, &interruptor, row_out);
+            return true;
+        } catch (const failed_table_op_exc_t &) {
+            *error_out = strprintf("The server(s) hosting table `%s.%s` are currently "
+                "unreachable.", db_name.c_str(), basic_config.name.c_str());
+            return false;
+        } catch (const admin_op_exc_t &msg) {
+            *error_out = msg.what();
+            return false;
+        }
+    } catch (const no_such_table_exc_t &) {
         *row_out = ql::datum_t();
         return true;
     }
 }
 
-name_string_t common_table_artificial_table_backend_t::get_db_name(database_id_t db_id) {
-    assert_thread();
-    databases_semilattice_metadata_t dbs = database_sl_view->get();
-    if (dbs.databases.at(db_id).is_deleted()) {
-        /* This can occur due to a race condition, if a new table is added to a database
-        at the same time as it is being deleted. */
-        return name_string_t::guarantee_valid("__deleted_database__");
-    } else {
-        return dbs.databases.at(db_id).get_ref().name.get_ref();
-    }
-}
-
-bool common_table_artificial_table_backend_t::get_db_id(name_string_t db_name,
-        database_id_t *db_out, std::string *error_out) {
-    assert_thread();
-    databases_semilattice_metadata_t dbs = database_sl_view->get();
-    metadata_searcher_t<database_semilattice_metadata_t> searcher(&dbs.databases);
-    metadata_search_status_t status;
-    auto db_it = searcher.find_uniq(db_name, &status);
-    if (!check_metadata_status(status, "Database", db_name.str(), true, error_out)) {
-        return false;
-    }
-    *db_out = db_it->first;
-    return true;
-}
 

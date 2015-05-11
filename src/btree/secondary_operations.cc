@@ -2,16 +2,15 @@
 #include "btree/secondary_operations.hpp"
 
 #include "btree/operations.hpp"
-#include "buffer_cache/alt/alt.hpp"
-#include "buffer_cache/alt/blob.hpp"
-#include "buffer_cache/alt/serialize_onto_blob.hpp"
+#include "buffer_cache/alt.hpp"
+#include "buffer_cache/blob.hpp"
+#include "buffer_cache/serialize_onto_blob.hpp"
 #include "containers/archive/vector_stream.hpp"
 #include "containers/archive/versioned.hpp"
 
 RDB_IMPL_SERIALIZABLE_5_SINCE_v1_13(
         secondary_index_t, superblock, opaque_definition,
         post_construction_complete, being_deleted, id);
-
 
 RDB_IMPL_SERIALIZABLE_2_SINCE_v1_13(sindex_name_t, name, being_deleted);
 
@@ -27,29 +26,50 @@ struct btree_sindex_block_magic_t {
     static const block_magic_t value;
 };
 
-template <>
-const block_magic_t
-btree_sindex_block_magic_t<cluster_version_t::v1_13>::value
-    = { { 's', 'i', 'n', 'd' } };
+block_magic_t v1_13_sindex_block_magic = { { 's', 'i', 'n', 'd' } };
 template <>
 const block_magic_t
 btree_sindex_block_magic_t<cluster_version_t::v1_14>::value
     = { { 's', 'i', 'n', 'e' } };
 template <>
 const block_magic_t
-btree_sindex_block_magic_t<cluster_version_t::v1_15_is_latest_disk>::value
+btree_sindex_block_magic_t<cluster_version_t::v1_15>::value
     = { { 's', 'i', 'n', 'f' } };
+template <>
+const block_magic_t
+btree_sindex_block_magic_t<cluster_version_t::v1_16>::value
+    = { { 's', 'i', 'n', 'g' } };
+template <>
+const block_magic_t
+btree_sindex_block_magic_t<cluster_version_t::v2_0>::value
+    = { { 's', 'i', 'n', 'h' } };
+template <>
+const block_magic_t
+btree_sindex_block_magic_t<cluster_version_t::v2_1_is_latest_disk>::value
+    = { { 's', 'i', 'n', 'i' } };
+
 
 cluster_version_t sindex_block_version(const btree_sindex_block_t *data) {
-    if (data->magic
-        == btree_sindex_block_magic_t<cluster_version_t::v1_13>::value) {
-        return cluster_version_t::v1_13;
+    if (data->magic == v1_13_sindex_block_magic) {
+        fail_due_to_user_error(
+            "Found a secondary index from unsupported RethinkDB version 1.13.  "
+            "You can migrate this secondary index using RethinkDB 2.0.");
     } else if (data->magic
                == btree_sindex_block_magic_t<cluster_version_t::v1_14>::value) {
         return cluster_version_t::v1_14;
     } else if (data->magic
-               == btree_sindex_block_magic_t<cluster_version_t::v1_15_is_latest_disk>::value) {
-        return cluster_version_t::v1_15_is_latest_disk;
+               == btree_sindex_block_magic_t<cluster_version_t::v1_15>::value) {
+        return cluster_version_t::v1_15;
+    } else if (data->magic
+               == btree_sindex_block_magic_t<cluster_version_t::v1_16>::value) {
+        return cluster_version_t::v1_16;
+    } else if (data->magic
+               == btree_sindex_block_magic_t<cluster_version_t::v2_0>::value) {
+        return cluster_version_t::v2_0;
+    } else if (data->magic
+               == btree_sindex_block_magic_t<
+                   cluster_version_t::v2_1_is_latest_disk>::value) {
+        return cluster_version_t::v2_1_is_latest_disk;
     } else {
         crash("Unexpected magic in btree_sindex_block_t.");
     }

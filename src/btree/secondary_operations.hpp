@@ -12,6 +12,13 @@
 #include "rpc/serialize_macros.hpp"
 #include "serializer/types.hpp"
 
+/* This file contains code for working with the sindex block, which is a child of the
+table's primary superblock.
+
+`btree/secondary_operations.*` and `btree/reql_specific.*` are the only files in the
+`btree/` directory that know about ReQL-specific concepts such as metainfo and sindexes.
+They should probably be moved out of the `btree/` directory. */
+
 class buf_lock_t;
 
 struct secondary_index_t {
@@ -44,13 +51,6 @@ struct secondary_index_t {
      * switching targets. This issue is described in more detail here:
      * https://github.com/rethinkdb/rethinkdb/issues/657 */
     uuid_u id;
-
-    /* Used in unit tests. */
-    /* TODO(2014-08): This weird thing should be and can be eliminated. */
-    bool operator==(const secondary_index_t &other) const {
-        return superblock == other.superblock &&
-               opaque_definition == other.opaque_definition;
-    }
 };
 
 RDB_DECLARE_SERIALIZABLE(secondary_index_t);

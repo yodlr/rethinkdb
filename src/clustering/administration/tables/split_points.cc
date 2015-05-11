@@ -28,9 +28,7 @@ static store_key_t interpolate_key(store_key_t in1, store_key_t in2, double frac
     arithmetic on them. If `in1` or `in2` terminates early, pad it with zeroes. This
     isn't perfect but the error doesn't matter for our purposes. */
     uint32_t in1_tail = 0, in2_tail = 0;
-    static const size_t num_interp = 4;
-    rassert(sizeof(in1_tail) >= num_interp);
-    for (size_t j = i; j < i + num_interp; ++j) {
+    for (size_t j = i; j < i + sizeof(in1_tail); ++j) {
         uint8_t c1 = j < static_cast<size_t>(in1.size()) ? in1_buf[j] : 0;
         uint8_t c2 = j < static_cast<size_t>(in2.size()) ? in2_buf[j] : 0;
         in1_tail = (in1_tail << 8) + c1;
@@ -39,20 +37,18 @@ static store_key_t interpolate_key(store_key_t in1, store_key_t in2, double frac
     rassert(in1_tail <= in2_tail);
 
     /* Compute an integer representation of the interpolated value */
-    uint32_t out_tail = in1_tail*(1-fraction) + in2_tail*fraction;
+    uint32_t out_tail = in1_tail * (1 - fraction) + in2_tail * fraction;
 
-    /* Append the interpolated value onto `out_buf` */
-    for (size_t k = 0; k < num_interp; ++k) {
-        uint8_t c = (out_tail >> (8 * (num_interp - k))) & 0xFF;
-        if (i + k < MAX_KEY_SIZE) {
-            out_buf[i + k] = c;
-        }
+    /* Append the interpolated value onto `out_buf`, discarding trailing null bytes */
+    size_t num_interp = 0;
+    while (num_interp < sizeof(out_tail) && out_tail != 0 && i + num_interp < MAX_KEY_SIZE) {
+        out_buf[i + num_interp] = (out_tail >> 24) & 0xFF;
+        ++num_interp;
+        out_tail <<= 8;
     }
 
     /* Construct the final result */
-    store_key_t out(
-        std::min(i + num_interp, static_cast<size_t>(MAX_KEY_SIZE)),
-        out_buf);
+    store_key_t out(i + num_interp, out_buf);
 
     /* For various reasons (rounding errors, corner cases involving keys very close
     together, etc.), it's possible that the above procedure will produce an `out` that is
@@ -89,13 +85,12 @@ static void ensure_distinct(std::vector<store_key_t> *split_points) {
     }
 }
 
-bool calculate_split_points_with_distribution(
-        namespace_id_t table_id,
+void fetch_distribution(
+        const namespace_id_t &table_id,
         real_reql_cluster_interface_t *reql_cluster_interface,
-        size_t num_shards,
         signal_t *interruptor,
-        table_shard_scheme_t *split_points_out,
-        std::string *error_out) {
+        std::map<store_key_t, int64_t> *counts_out)
+        THROWS_ONLY(interrupted_exc_t, failed_table_op_exc_t, no_such_table_exc_t) {
     namespace_interface_access_t ns_if_access =
         reql_cluster_interface->get_namespace_repo()->get_namespace_interface(
             table_id, interruptor);
@@ -106,14 +101,21 @@ bool calculate_split_points_with_distribution(
     read_response_t resp;
     try {
         ns_if_access.get()->read_outdated(read, &resp, interruptor);
-    } catch (cannot_perform_query_exc_t) {
-        *error_out = "Cannot calculate balanced shards because the table isn't "
-            "currently available for reading.";
-        return false;
+    } catch (const cannot_perform_query_exc_t &) {
+        /* If the table was deleted, this will throw `no_such_table_exc_t` */
+        table_basic_config_t dummy;
+        reql_cluster_interface->get_table_meta_client()->get_name(table_id, &dummy);
+        /* If `get_name()` didn't throw, the table exists but is inaccessible */
+        throw failed_table_op_exc_t();
     }
+    *counts_out = std::move(
+        boost::get<distribution_read_response_t>(resp.response).key_counts);
+}
 
-    const std::map<store_key_t, int64_t> &counts =
-        boost::get<distribution_read_response_t>(resp.response).key_counts;
+bool calculate_split_points_with_distribution(
+        const std::map<store_key_t, int64_t> &counts,
+        size_t num_shards,
+        table_shard_scheme_t *split_points_out) {
     std::vector<std::pair<int64_t, store_key_t> > pairs;
     int64_t total_count = 0;
     for (auto const &pair : counts) {
@@ -123,8 +125,6 @@ bool calculate_split_points_with_distribution(
         total_count += pair.second;
     }
     if (pairs.size() < static_cast<size_t>(num_shards)) {
-        *error_out = strprintf("There isn't enough data in the table to create %zu "
-            "balanced shards.", num_shards);
         return false;
     }
 
@@ -149,6 +149,30 @@ bool calculate_split_points_with_distribution(
     ensure_distinct(&split_points_out->split_points);
 
     return true;
+}
+
+store_key_t key_for_uuid(uint64_t first_8_bytes) {
+    uuid_u uuid;
+    bzero(uuid.data(), uuid_u::static_size());
+    for (size_t i = 0; i < 8; i++) {
+        /* Copy one byte at a time to avoid endianness issues */
+        uuid.data()[i] = (first_8_bytes >> (8 * (7 - i))) & 0xFF;
+    }
+    return store_key_t(ql::datum_t(datum_string_t(uuid_to_str(uuid))).print_primary());
+}
+
+/* `calculate_split_points_for_uuids` generates a set of split points that will divide
+the range of UUIDs evenly. */
+void calculate_split_points_for_uuids(
+        size_t num_shards,
+        table_shard_scheme_t *split_points_out) {
+    split_points_out->split_points.clear();
+    for (size_t i = 0; i < num_shards-1; ++i) {
+        split_points_out->split_points.push_back(key_for_uuid(
+            (std::numeric_limits<uint64_t>::max() / num_shards) * (i+1)));
+        guarantee(i == 0 ||
+            split_points_out->split_points[i] > split_points_out->split_points[i-1]);
+    }
 }
 
 /* In practice this will only ever be used to decrease the number of shards, but it still
@@ -186,22 +210,23 @@ void calculate_split_points_by_interpolation(
     ensure_distinct(&split_points_out->split_points);
 }
 
-bool calculate_split_points_intelligently(
+void calculate_split_points_intelligently(
         namespace_id_t table_id,
         real_reql_cluster_interface_t *reql_cluster_interface,
         size_t num_shards,
         const table_shard_scheme_t &old_split_points,
         signal_t *interruptor,
-        table_shard_scheme_t *split_points_out,
-        std::string *error_out) {
+        table_shard_scheme_t *split_points_out)
+        THROWS_ONLY(interrupted_exc_t, failed_table_op_exc_t, no_such_table_exc_t) {
     if (num_shards > old_split_points.num_shards()) {
+        std::map<store_key_t, int64_t> counts;
+        fetch_distribution(table_id, reql_cluster_interface, interruptor, &counts);
         if (!calculate_split_points_with_distribution(
-                table_id, reql_cluster_interface, num_shards, interruptor,
-                split_points_out, error_out)) {
-            *error_out += " Try creating fewer shards; if you don't increase the "
-                "number of shards, it won't be necessary to calculate new balanced "
-                "shards.";
-            return false;
+                counts, num_shards, split_points_out)) {
+            /* There aren't enough documents to calculate distribution. We'll just assume
+            the user is going to use UUID primary keys. If we got it wrong, they will end
+            up with horribly unbalanced data, but it's the best we can do. */
+            calculate_split_points_for_uuids(num_shards, split_points_out);
         }
     } else if (num_shards == old_split_points.num_shards()) {
         *split_points_out = old_split_points;
@@ -209,6 +234,5 @@ bool calculate_split_points_intelligently(
         calculate_split_points_by_interpolation(
             num_shards, old_split_points, split_points_out);
     }
-    return true;
 }
 

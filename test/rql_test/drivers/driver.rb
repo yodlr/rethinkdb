@@ -1,60 +1,116 @@
 require 'pp'
+require 'set'
 
 $test_count = 0
 $failure_count = 0
 $success_count = 0
 
-JSPORT = ARGV[0]
-CPPPORT = ARGV[1]
-DB_AND_TABLE_NAME = ARGV[2]
+DEBUG_ENABLED = ENV['VERBOSE'] ? ENV['VERBOSE'] == 'true' : false
+START_TIME = Time.now()
 
-# -- import the called-for rethinkdb module
-if ENV['RUBY_DRIVER_DIR']
-  $LOAD_PATH.unshift ENV['RUBY_DRIVER_DIR']
-  require 'rethinkdb'
-  $LOAD_PATH.shift
-else
-  # look for the source directory
-  targetPath = File.expand_path(File.dirname(__FILE__))
-  while targetPath != File::Separator
-    sourceDir = File.join(targetPath, 'drivers', 'ruby')
-    if File.directory?(sourceDir)
-      unless system("make -C " + sourceDir)
-        abort "Unable to build the ruby driver at: " + sourceDir
-      end
-      $LOAD_PATH.unshift(File.join(sourceDir, 'lib'))
-      require 'rethinkdb'
-      $LOAD_PATH.shift
-      break
+def print_debug(message)
+    if DEBUG_ENABLED
+        puts("DEBUG %.2f:\t %s" % [Time.now() - START_TIME, message])
     end
-    targetPath = File.dirname(targetPath)
-  end
 end
-extend RethinkDB::Shortcuts
 
-def show x
-  if x.class == Err
+DRIVER_PORT = (ARGV[0] || ENV['RDB_DRIVER_PORT'] || raise('driver port not supplied')).to_i
+print_debug("Using driver port #{DRIVER_PORT}")
+
+$required_external_tables = []
+if ARGV[1] || ENV['TEST_DB_AND_TABLE_NAME']
+  (ARGV[1] || ENV['TEST_DB_AND_TABLE_NAME']).split(',').each { |table_raw|
+    table_raw = table_raw.strip()
+    if table_raw == ''
+      next
+    end
+    split_value = table_raw.split('.')
+    case split_value.count
+    when 1
+      $required_external_tables.push(['test', split_value[0]])
+    when 2
+      $required_external_tables.push([split_value[0], split_value[1]])
+    else
+      raise('Unusable value for external tables: ' + table_raw)
+    end
+  }
+end
+$required_external_tables = $required_external_tables.reverse
+$stdout.flush
+
+# -- import the rethinkdb driver
+
+require_relative '../importRethinkDB.rb'
+
+# --
+
+$reql_conn = RethinkDB::Connection.new(:host => 'localhost', :port => DRIVER_PORT)
+begin
+  r.db_create('test').run($reql_conn)
+rescue
+end
+
+$defines = binding
+
+# --
+
+def show(x)
+  if x.is_a?(Err)
     name = x.type.sub(/^RethinkDB::/, "")
     return "<#{name} #{'~ ' if x.regex}#{show x.message}>"
   end
   return (PP.pp x, "").chomp
 end
 
-NoError = "nope"
+NoError = "<no error>"
 AnyUUID = "<any uuid>"
 Err = Struct.new(:type, :message, :backtrace, :regex)
-Bag = Struct.new(:items)
+Bag = Struct.new(:items, :partial)
+PartitalHash = Struct.new(:hash)
 
-def bag list
-  Bag.new(list)
+def bag(list, partial=false)
+  Bag.new(list, partial)
 end
 
-def arrlen len, x
-  Array.new len, x
+def partial(expected)
+  if expected.kind_of?(Array)
+    bag(expected, true)
+  elsif expected.kind_of?(Bag)
+    bag(expected.items, true)
+  elsif expected.kind_of?(Hash)
+    PartitalHash.new(expected)
+  else
+    raise("partial can only handle Hashs, Arrays, or Bags. Got: #{expected.class}")
+  end
+end
+
+def fetch(cursor, limit=nil)
+  raise "The limit value of fetch must be nil or > 0, got: #{limit}" unless limit.nil? or true
+  if limit.nil?
+    return cursor.to_a
+  else
+    result = []
+    limit.times do
+      result.push(cursor.next)
+    end
+    return result
+  end
+end
+
+def wait(seconds)
+  sleep(seconds)
+end
+
+def arrlen(len, x)
+  Array.new(len, x)
 end
 
 def uuid
   AnyUUID
+end
+
+def shard
+  # do nothing in Ruby tests
 end
 
 def err(type, message, backtrace=[])
@@ -65,29 +121,25 @@ def err_regex(type, message, backtrace=[])
   Err.new(type, message, backtrace, true)
 end
 
-def eq_test(expected, result, testopts={})
-  return cmp_test(expected, result, testopts) == 0
-end
-
 class Number
   def initialize(value)
     @value = value
     @requiredType = value.class
   end
-  
+
   def method_missing(name, *args)
     return @number.send(name, *args)
   end
-  
+
   def to_s
     return @value.to_s + "(explicit" + @requiredType.name + ")"
   end
-  
+
   def inspect
     return @value.to_s + " (explicit " + @requiredType.name + ")"
   end
-  attr_reader :value 
-  attr_reader :requiredType 
+  attr_reader :value
+  attr_reader :requiredType
 end
 
 def int_cmp(value)
@@ -100,12 +152,16 @@ def float_cmp(value)
   return Number.new(value)
 end
 
-def cmp_test(expected, result, testopts={})
+def cmp_test(expected, result, testopts={}, partial=false)
   if expected.object_id == NoError.object_id
-    return -1 if result.class == Err
+    if result.is_a?(Err)
+      puts result
+      puts result.backtrace
+      return -1
+    end
     return 0
   end
-  
+
   if expected.nil? and result.nil?
     return 0
   elsif result.nil?
@@ -113,14 +169,14 @@ def cmp_test(expected, result, testopts={})
   elsif expected.nil?
     return -1
   end
-  
+
   if expected.object_id == AnyUUID.object_id
     return -1 if not result.kind_of? String
     return 0 if result.match /[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}/
     return 1
   end
 
-  if result.class == String then
+  if result.is_a?(String) then
     result = result.sub(/\nFailed assertion:(.|\n)*/, "")
   end
 
@@ -148,21 +204,46 @@ def cmp_test(expected, result, testopts={})
     end
     cmp = result.class.name <=> expected.class.name
     return cmp if cmp != 0
-    cmp = result.length <=> expected.length
-    return cmp if cmp != 0
-    expected.zip(result) { |pair|
-      cmp = cmp_test(pair[0], pair[1], testopts)
+    if partial
+      resultKeys = result.sort.each
+      expected.sort.each { |expectedKey|
+        cmp = -1
+        for resultKey in resultKeys
+          cmp = cmp_test(expectedKey, resultKey, testopts)
+          if cmp == 0
+            break
+          end
+        end
+        if cmp != 0
+          return cmp
+        end
+      }
+    else
+      cmp = result.length <=> expected.length
       return cmp if cmp != 0
-    }
+      expected.zip(result) { |pair|
+        cmp = cmp_test(pair[0], pair[1], testopts)
+        return cmp if cmp != 0
+      }
+    end
     return 0
+
+  when "PartitalHash"
+    return cmp_test(expected.hash, result, testopts, true)
 
   when "Hash"
     cmp = result.class.name <=> expected.class.name
     return cmp if cmp != 0
     result = Hash[ result.map{ |k,v| [k.to_s, v] } ]
     expected = Hash[ expected.map{ |k,v| [k.to_s, v] } ]
-    cmp = result.keys.sort <=> expected.keys.sort
-    return cmp if cmp != 0
+    if partial
+        if not Set.new(expected.keys).subset?(Set.new(result.keys))
+          return -1
+        end
+    else
+        cmp = result.keys.sort <=> expected.keys.sort
+        return cmp if cmp != 0
+    end
     expected.each_key { |key|
       cmp = cmp_test(expected[key], result[key], testopts)
       return cmp if cmp != 0
@@ -173,15 +254,16 @@ def cmp_test(expected, result, testopts={})
     return cmp_test(
       expected.items.sort{ |a, b| cmp_test(a, b, testopts) },
       result.sort{ |a, b| cmp_test(a, b, testopts) },
-      testopts
+      testopts,
+      expected.partial
     )
-  
+
   when "Float", "Fixnum", "Number"
     if not (result.kind_of? Float or result.kind_of? Fixnum)
       cmp = result.class.name <=> expected.class.name
       return cmp if cmp != 0
     end
-    
+
     if expected.kind_of?(Number)
       if not result.kind_of?(expected.requiredType)
         cmp = result.class.name <=> expected.class.name
@@ -189,7 +271,7 @@ def cmp_test(expected, result, testopts={})
       end
       expected = expected.value
     end
-    
+
     if testopts.has_key?(:precision)
       diff = result - expected
       if (diff).abs < testopts[:precision]
@@ -200,7 +282,7 @@ def cmp_test(expected, result, testopts={})
     else
       return result <=> expected
     end
-  
+
   else
     begin
       cmp = result <=> expected
@@ -212,95 +294,160 @@ def cmp_test(expected, result, testopts={})
   end
 end
 
-def eval_env; binding; end
-$defines = eval_env
-
-$cpp_conn = RethinkDB::Connection.new(:host => 'localhost', :port => CPPPORT)
-begin
-  r.db_create('test').run($cpp_conn)
-rescue
-end
-
-def test src, expected, name, opthash=nil, testopts=nil
-  if opthash
-    $opthash = Hash[opthash.map{|k,v| [k, eval(v, $defines)]}]
-    if !$opthash[:max_batch_rows]
-      $opthash[:max_batch_rows] = 3
-    end
-  else
-    $opthash = {max_batch_rows: 3}
-  end
+def test(src, expected, name, opthash=nil, testopts=nil)
   $test_count += 1
-  
-  if not (testopts and testopts.key?(:'reql-query') and testopts[:'reql-query'].to_s().downcase == 'false')
-    # check that it evaluates without running it
-    begin
-      eval(src, $defines)
-    rescue Exception => e
-      result = err(e.class.name.sub(/^RethinkDB::/, ""), e.message.split("\n")[0], "TODO")
-      return check_result(name, src, result, expected, testopts)
-    end
-  end
-  
-  # construct the query
-  queryString = ''
-  if testopts and testopts.key?(:'variable')
-    queryString += testopts[:'variable'] + " = "
-  end
-  
-  if not (testopts and testopts.key?(:'reql-query') and testopts[:'reql-query'].to_s().downcase == 'false')
-    queryString += '(' + src + ')' # handle cases like: r(1) + 3
-    if opthash
-      opthash.each{ |key, value| opthash[key] = eval(value.to_s)}
-      queryString += '.run($cpp_conn, ' + opthash.to_s + ')'
-    else
-      queryString += '.run($cpp_conn)'
-    end
-  else
-    queryString += src
-  end
-  
-  # run the query
+
   begin
-    result = eval queryString, $defines
-  rescue Exception => e
-    result = err(e.class.name.sub(/^RethinkDB::/, ""), e.message.split("\n")[0], "TODO")
+    # -- process the opthash
+
+    if opthash
+      opthash = Hash[opthash.map{ |key,value|
+        if value.is_a?(String)
+          begin
+            value = $defines.eval(value)
+          rescue NameError
+          end
+        end
+        if key.is_a?(String)
+          begin
+            key = key.to_sym
+          rescue NameError
+          end
+        end
+        [key, value]
+      }]
+      if !opthash[:max_batch_rows] && !opthash['max_batch_rows']
+        opthash[:max_batch_rows] = 3
+      end
+    else
+      opthash = {:max_batch_rows => 3}
+    end
+
+    # -- process the testopts
+
+    if testopts
+      testopts = Hash[testopts.map{ |key,value|
+        if value.is_a?(String)
+          begin
+            value = $defines.eval(value)
+          rescue StandardError
+          end
+        end
+        if key.is_a?(String)
+          begin
+            key = key.to_sym
+          rescue StandardError
+          end
+        end
+        [key, value]
+      }]
+    else
+      testopts = {}
+    end
+
+    # -- run the command
+
+    result = nil
+    begin
+
+      # - save variable if requested
+
+      if testopts && testopts.key?(:variable)
+        queryString = "#{testopts[:variable]} = (#{src})" # handle cases like: r(1) + 3
+      else
+        queryString = "(#{src})" # handle cases like: r(1) + 3
+      end
+
+      # - run the command
+
+      result = $defines.eval(queryString)
+
+      # - run as a query if it is one
+
+      if result.kind_of?(RethinkDB::Cursor) || result.kind_of?(Enumerator)
+        print_debug("Evaluating cursor: #{queryString} #{testopts}")
+
+      elsif result.kind_of?(RethinkDB::RQL)
+
+        if opthash and opthash.length > 0
+          optstring = opthash.to_s[1..-2].gsub(/(?<quoteChar>['"]?)\b(?<!:)(?<key>\w+)\b\k<quoteChar>\s*=>/, ':\k<key>=>')
+          queryString += '.run($reql_conn, ' + optstring + ')' # removing braces
+        else
+          queryString += '.run($reql_conn)'
+        end
+        print_debug("Running query: #{queryString} Options: #{testopts}")
+        result = $defines.eval(queryString)
+
+        if result.kind_of?(RethinkDB::Cursor) # convert cursors into Enumerators to allow for poping single items
+	      result = result.each
+	      if testopts && testopts.key?(:variable)
+		    $defines.eval("#{testopts[:variable]} = #{testopts[:variable]}.each")
+		  end
+	    end
+      else
+        print_debug("Running: #{queryString}")
+      end
+
+    rescue StandardError, SyntaxError => e
+      result = err(e.class.name.sub(/^RethinkDB::/, ""), e.message.split("\n")[0], e.backtrace)
+    end
+
+    if testopts && testopts.key?(:noreply_wait) && testopts[:noreply_wait]
+        $reql_conn.noreply_wait
+    end
+
+    # -- process the result
+
+    return check_result(name, src, result, expected, testopts)
+
+  rescue StandardError, SyntaxError => err
+    fail_test(name, src, err, expected, type="TEST")
   end
-  return check_result(name, src, result, expected, testopts)
-  
 end
 
-# Generated code must call either `setup_table` or `check_no_table_specified`
-def setup_table table_variable_name, table_name
-  at_exit do
-    if DB_AND_TABLE_NAME == "no_table_specified"
-      res = r.db("test").table_drop(table_name).run($cpp_conn)
-      if res["dropped"] != 1
-        abort "Could not drop table: #{res}"
-      end
-    else
-      parts = DB_AND_TABLE_NAME.split('.')
-      res = r.db(parts.first).table(parts.last).delete().run($cpp_conn)
-      if res["errors"] != 0
-        abort "Could not clear table: #{res}"
-      end
-      res = r.db(parts.first).table(parts.last).index_list().for_each{|row|
-        r.db(parts.first).table(parts.last).index_drop(row)}.run($cpp_conn)
-      if res.has_key?("errors") and res["errors"] != 0
-        abort "Could not drop indexes: #{res}"
-      end
+def setup_table(table_variable_name, table_name, db_name="test")
+
+  if $required_external_tables.count > 0
+    # use one of the required tables
+    db_name, table_name = $required_external_tables.pop
+    begin
+        r.db(db_name).table(table_name).info().run($reql_conn)
+    rescue RethinkDB::RqlRuntimeError
+      "External table #{db_name}.#{table_name} did not exist"
+    end
+
+    puts("Using existing table: #{db_name}.#{table_name}, will be: #{table_variable_name}")
+
+    at_exit do
+      res = r.db(db_name).table(table_name).delete().run($reql_conn)
+      raise "Failed to clean out contents from table #{db_name}.#{table_name}: #{res}" unless res["errors"] == 0
+      r.db(db_name).table(table_name).index_list().for_each{|row| r.db(db_name).table(table_name).index_drop(row)}.run($reql_conn)
+    end
+  else
+    # create a new table
+    if r.db(db_name).table_list().set_intersection([table_name]).count().eq(1).run($reql_conn)
+      res = r.db(db_name).table_drop(table_name).run($reql_conn)
+      raise "Unable to delete table before use #{db_name}.#{table_name}: #{res}" unless res['errors'] == 0
+    end
+    res = r.db(db_name).table_create(table_name).run($reql_conn)
+    raise "Unable to create table #{db_name}.#{table_name}: #{res}" unless res["tables_created"] == 1
+
+    print_debug("Created table: #{db_name}.#{table_name}, will be: #{table_variable_name}")
+    $stdout.flush
+
+    at_exit do
+      res = r.db(db_name).table_drop(table_name).run($reql_conn)
+      raise "Failed to delete table #{db_name}.#{table_name}: #{res}" unless res["tables_dropped"] == 1
     end
   end
-  if DB_AND_TABLE_NAME == "no_table_specified"
-    res = r.db("test").table_create(table_name).run($cpp_conn)
-    if res["created"] != 1
-      abort "Could not create table: #{res}"
+
+  $defines.eval("#{table_variable_name} = r.db('#{db_name}').table('#{table_name}')")
+end
+
+def setup_table_check()
+    if $required_external_tables.count > 0
+      raise "Unused external tables, that is probably not supported by this test: {$required_external_tables}"
     end
-      $defines.eval("#{table_variable_name} = r.db('test').table('#{table_name}')")
-    else
-      parts = DB_AND_TABLE_NAME.split('.')
-      $defines.eval("#{table_variable_name} = r.db(\"#{parts.first}\").table(\"#{parts.last}\")")
-  end
 end
 
 def check_no_table_specified
@@ -314,46 +461,56 @@ at_exit do
 end
 
 def check_result(name, src, result, expected, testopts={})
-  sucessfulTest = true
   begin
-    if expected && expected != ''
-      expected = eval expected.to_s, $defines
-    else
-      expected = NoError
-    end
-  rescue Exception => e
-    $stderr.puts "SETUP ERROR: #{name}"
-    $stderr.puts "\tBODY: #{src}"
-    $stderr.puts "\tEXPECTED: #{show expected}"
-    $stderr.puts "\tFAILURE: #{e}"
-    $stderr.puts ""
-    sucessfulTest = false
-  end
-  if sucessfulTest
+    successfulTest = true
     begin
-      if ! eq_test(expected, result, testopts)
-        fail_test(name, src, result, expected)
-        sucessfulTest = false
+      if expected && expected != ''
+        expected = $defines.eval(expected.to_s)
+      else
+        expected = NoError
       end
-    rescue Exception => e
-      sucessfulTest = false
-      puts "#{name}: Error: #{e} when comparing #{show result} and #{show expected}"
+    rescue Exception => err
+      fail_test(name, src, err, expected, type="SETUP")
+      successfulTest = false
     end
-  end
-  if sucessfulTest
-    $success_count += 1
-    return true
-  else
-    $failure_count += 1
-    return false
+    if successfulTest
+      # - read out cursors
+
+      if (result.kind_of?(RethinkDB::Cursor) || result.kind_of?(Enumerator)) && expected != NoError
+        result = result.to_a
+      end
+
+      begin
+        if cmp_test(expected, result, testopts) != 0
+          fail_test(name, src, result, expected)
+          successfulTest = false
+        end
+      rescue Exception => err
+        successfulTest = false
+        fail_test(name, src, err, expected, type="TEST COMPARISON ERROR")
+      end
+    end
+    if successfulTest
+      $success_count += 1
+      return true
+    else
+      $failure_count += 1
+      return false
+    end
+  rescue StandardError, SyntaxError => e
+     $stderr.puts("Check_result error: #{e}")
   end
 end
 
-def fail_test name, src, res, expected
+def fail_test(name, src, result, expected, type="TEST")
   $stderr.puts "TEST FAILURE: #{name}"
   $stderr.puts "\tBODY: #{src}"
-  $stderr.puts "\tVALUE: #{show res}"
+  $stderr.puts "\tVALUE: #{show result}"
   $stderr.puts "\tEXPECTED: #{show expected}"
+  if result && result.kind_of?(Exception)
+    $stderr.puts "\tEXCEPTION: #{result.message}"
+    $stderr.puts result.backtrace.join("\n")
+  end
   $stderr.puts ""
 end
 
@@ -363,10 +520,13 @@ def the_end
   end
 end
 
-def define expr
-  eval expr, $defines
+def define(expr, variable=nil)
+  if variable
+    $defines.eval("#{variable} = #{expr}")
+  else
+    $defines.eval(expr)
+  end
 end
 
 True=true
 False=false
-

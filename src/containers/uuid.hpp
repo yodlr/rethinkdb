@@ -38,8 +38,6 @@ private:
     uint8_t data_[kStaticSize];
 };
 
-
-
 bool operator==(const uuid_u& x, const uuid_u& y);
 inline bool operator!=(const uuid_u& x, const uuid_u& y) { return !(x == y); }
 bool operator<(const uuid_u& x, const uuid_u& y);
@@ -63,10 +61,9 @@ bool is_uuid(const std::string& str);
 
 typedef uuid_u namespace_id_t;
 typedef uuid_u database_id_t;
-typedef uuid_u machine_id_t;
+typedef uuid_u server_id_t;
 typedef uuid_u backfill_session_id_t;
 typedef uuid_u branch_id_t;
-typedef uuid_u reactor_activity_id_t;
 typedef uuid_u issue_id_t;
 
 
