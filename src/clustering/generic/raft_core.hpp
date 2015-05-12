@@ -634,12 +634,14 @@ public:
         signal_t *interruptor,
         raft_rpc_reply_t *reply_out);
 
+#ifndef NDEBUG
     /* `check_invariants()` asserts that the given collection of Raft cluster members are
     in a valid, consistent state. This may block, because it needs to acquire each
     member's mutex, but it will not modify anything. Since this requires direct access to
     each member of the Raft cluster, it's only useful for testing. */
     static void check_invariants(
         const std::set<raft_member_t<state_t> *> &members);
+#endif /* NDEBUG */
 
 private:
     /* The Raft paper describes three states: "follower", "candidate", and "leader". We
@@ -685,12 +687,14 @@ private:
         signal_t *interruptor,
         raft_rpc_reply_t::step_down_t *reply_out);
 
+#ifndef NDEBUG
     /* Asserts that all of the invariants that can be checked locally hold true. This
     doesn't block or modify anything. It should be safe to call it at any time (except
     when in between modifying two variables that should remain consistent with each
     other, of course). In general we call it whenever we acquire or release the mutex,
     because we know that the variables should be consistent at those times. */
     void check_invariants(const new_mutex_acq_t *mutex_acq);
+#endif /* NDEBUG */
 
     /* `on_connected_members_change()` is called when a member connects or disconnects.
     */
@@ -739,14 +743,13 @@ private:
 
     /* `stop_election_and_leader_coro()` stops `election_and_leader_coro()`
     and blocks until the coro exits. If we were in the `leader` state before, it also
-    sends out StepDown RPCs so the other nodes know we're no longer acting as leader. It
-    leaves `mode` set to `follower_unled`, so the caller must either change `mode` to
-    `follower_led` or call `start_election_and_leader_coro()` in order to regain the
-    invariant that `election_and_leader_coro()` is running unless we are in the
-    `follower_led` state. */
+    sends out StepDown RPCs asynchronously so the other nodes know we're no longer acting
+    as leader. It leaves `mode` set to `follower_unled`, so the caller must either change
+    `mode` to `follower_led` or call `start_election_and_leader_coro()` in order to
+    regain the invariant that `election_and_leader_coro()` is running unless we are in
+    the `follower_led` state. */
     void stop_election_and_leader_coro(
-        const new_mutex_acq_t *mutex_acq,
-        signal_t *interruptor);
+        const new_mutex_acq_t *mutex_acq);
 
     /* `update_term_and_reset_election_and_leader_coro()` is equivalent to calling
     `stop_election_and_leader_coro()`, `update_term()`, and
@@ -872,7 +875,8 @@ private:
     /* `current_term_leader_invalid` is `true` if we received a StepDown RPC or
     disconnection event for the member mentioned in `current_term_leader_id` during this
     term. If this is `true`, we won't interpret further AppendEntries or InstallSnapshot
-    RPCs this term as evidence of a living leader. */
+    RPCs this term as evidence of a living leader. (However, we will still process the
+    RPCs normally.) */
     bool current_term_leader_invalid;
 
     /* `last_leader_time` is the time at which we last received a valid RPC from a

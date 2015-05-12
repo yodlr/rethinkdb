@@ -43,6 +43,15 @@ public:
     any other members. A `dead` member is just a stored `raft_persistent_state_t`. */
     enum class live_t { alive, isolated, dead };
 
+    static const char *show_live(live_t live) {
+        switch (live) {
+            case live_t::alive: return "ALIVE";
+            case live_t::isolated: return "ISOLATED";
+            case live_t::dead: return "DEAD";
+            default: unreachable();
+        }
+    }
+
     /* The constructor starts a cluster of `num` alive members with the given initial
     state. */
     dummy_raft_cluster_t(
@@ -99,22 +108,39 @@ public:
             "members.");
         raft_member_id_t member_id(generate_uuid());
         add_member(member_id, init_state);
+#ifdef RAFT_DEBUG_LOGGING
+        debugf("%s: newly created\n", show(member_id).c_str());
+#endif
         return member_id;
+    }
+
+    live_t get_live(const raft_member_id_t &member_id) {
+        member_info_t *i = members.at(member_id).get();
+        if (i->connected) {
+            guarantee(i->member.has());
+            return live_t::alive;
+        } else if (i->member.has()) {
+            return live_t::isolated;
+        } else {
+            return live_t::dead;
+        }
     }
 
     /* `set_live()` puts the given member into the given state. */
     void set_live(const raft_member_id_t &member_id, live_t live) {
+#ifdef RAFT_DEBUG_LOGGING
+        debugf("%s: state %s -> %s\n", show(member_id).c_str(),
+            show_live(get_live(member_id)), show_live(live));
+#endif /* RAFT_DEBUG_LOGGING */
         member_info_t *i = members.at(member_id).get();
-        if (i->rpc_drainer.has() && live != live_t::alive) {
-            member_directory.delete_key(member_id);
-            /* The reason we don't just do `i->rpc_drainer.reset()` is that if something
-            were to read `i->rpc_drainer` while the `auto_drainer_t` destructor was
-            blocking, it might get a pointer to an invalid `auto_drainer_t` instead of
-            getting a null pointer. This workaround ensures that `i->rpc_drainer` will
-            always either be valid or null. */
-            scoped_ptr_t<auto_drainer_t> dummy;
-            std::swap(i->rpc_drainer, dummy);
-            dummy.reset();
+        if (i->connected && live != live_t::alive) {
+            for (const auto &pair : members) {
+                if (pair.second->connected) {
+                    pair.second->directory.delete_key(member_id);
+                    i->directory.delete_key(pair.first);
+                }
+            }
+            i->connected = false;
         }
         {
             if (i->member.has() && live == live_t::dead) {
@@ -125,15 +151,20 @@ public:
             }
             if (!i->member.has() && live != live_t::dead) {
                 i->member.init(new raft_networked_member_t<dummy_raft_state_t>(
-                    member_id, &mailbox_manager, &member_directory, i, i->stored_state,
-                    ""));
+                    member_id, &mailbox_manager, &i->directory, i, i->stored_state, ""));
                 i->member_drainer.init(new auto_drainer_t);
             }
         }
-        if (!i->rpc_drainer.has() && live == live_t::alive) {
-            i->rpc_drainer.init(new auto_drainer_t);
-            member_directory.set_key_no_equals(
-                member_id, i->member->get_business_card());
+        if (!i->connected && live == live_t::alive) {
+            i->connected = true;
+            for (const auto &pair : members) {
+                if (pair.second->connected) {
+                    pair.second->directory.set_key_no_equals(
+                        member_id, i->member->get_business_card());
+                    i->directory.set_key_no_equals(
+                        pair.first, pair.second->member->get_business_card());
+                }
+            }
         }
     }
 
@@ -267,7 +298,7 @@ private:
     class member_info_t :
         public raft_storage_interface_t<dummy_raft_state_t> {
     public:
-        member_info_t() { }
+        member_info_t() : connected(false) { }
         member_info_t(member_info_t &&) = default;
         member_info_t &operator=(member_info_t &&) = default;
 
@@ -292,11 +323,14 @@ private:
         dummy_raft_cluster_t *parent;
         raft_member_id_t member_id;
         raft_persistent_state_t<dummy_raft_state_t> stored_state;
-        /* If the member is alive, `member`, `member_drainer`, and `rpc_drainer` are set.
-        If the member is isolated, `member` and `member_drainer` are set but
-        `rpc_drainer` is empty. If the member is dead, all are empty. */
+        watchable_map_var_t<raft_member_id_t, raft_business_card_t<dummy_raft_state_t> >
+            directory;
+        /* `connected` is `true` iff the member is alive. */
+        bool connected;
+        /* If the member is alive or isolated, `member` and `member_drainer` are set. */
         scoped_ptr_t<raft_networked_member_t<dummy_raft_state_t> > member;
-        scoped_ptr_t<auto_drainer_t> member_drainer, rpc_drainer;
+        scoped_ptr_t<auto_drainer_t> member_drainer;
+        
     };
 
     void add_member(
@@ -327,8 +361,6 @@ private:
     connectivity_cluster_t::run_t connectivity_cluster_run;
 
     std::map<raft_member_id_t, scoped_ptr_t<member_info_t> > members;
-    watchable_map_var_t<raft_member_id_t, raft_business_card_t<dummy_raft_state_t> >
-        member_directory;
     auto_drainer_t drainer;
     repeating_timer_t check_invariants_timer;
 };
@@ -341,7 +373,8 @@ public:
         cluster(_cluster) {
         for (int i = 0; i < num_threads; ++i) {
             coro_t::spawn_sometime(std::bind(
-                &dummy_raft_traffic_generator_t::do_changes, this, drainer.lock()));
+                &dummy_raft_traffic_generator_t::do_background_changes,
+                this, drainer.lock()));
         }
     }
 
@@ -359,8 +392,45 @@ public:
         }
     }
 
+    void do_changes(int count, int timeout_ms) {
+#ifdef RAFT_DEBUG_LOGGING
+        debugf("do_changes(): begin %d changes in %dms\n", count, timeout_ms);
+        std::map<raft_member_id_t, int> leaders;
+#endif
+        int done = 0;
+        try {
+            signal_timer_t timer;
+            timer.start(timeout_ms);
+            while (done < count) {
+                uuid_u change = generate_uuid();
+                raft_member_id_t leader = cluster->find_leader(&timer);
+                bool ok = cluster->try_change(leader, change, &timer);
+                if (ok) {
+#ifdef RAFT_DEBUG_LOGGING
+                    ++leaders[leader];
+#endif
+                    committed_changes.insert(change);
+                    ++done;
+                }
+            }
+        } catch (const interrupted_exc_t &) {
+            ADD_FAILURE() << "do_changes() only completed " << done << "/" << count <<
+                " changes in " << timeout_ms << "ms";
+        }
+#ifdef RAFT_DEBUG_LOGGING
+        std::string message;
+        for (const auto &pair : leaders) {
+            if (!message.empty()) {
+                message += ", ";
+            }
+            message += strprintf("%s*%d", show(pair.first).c_str(), pair.second);
+        }
+        debugf("do_changes(): end changes %s\n", message.c_str());
+#endif
+    }
+
 private:
-    void do_changes(auto_drainer_t::lock_t keepalive) {
+    void do_background_changes(auto_drainer_t::lock_t keepalive) {
         try {
             while (true) {
                 uuid_u change = generate_uuid();
@@ -382,14 +452,20 @@ private:
 };
 
 void do_writes(dummy_raft_cluster_t *cluster, raft_member_id_t leader, int ms, int expect) {
-    dummy_raft_traffic_generator_t traffic_generator(cluster, 3);
-    cond_t non_interruptor;
-    nap(ms, &non_interruptor);
-    ASSERT_LT(expect, traffic_generator.get_num_changes());
+    dummy_raft_traffic_generator_t traffic_generator(cluster, 1);
+    traffic_generator.do_changes(expect, ms);
     cluster->run_on_member(leader, [&](dummy_raft_member_t *member, signal_t *) {
         dummy_raft_state_t state = member->get_committed_state()->get().state;
         traffic_generator.check_changes_present(state);
     });
+}
+
+dummy_raft_cluster_t::live_t dead_or_isolated() {
+    if (randint(2) == 0) {
+        return dummy_raft_cluster_t::live_t::dead;
+    } else {
+        return dummy_raft_cluster_t::live_t::isolated;
+    }
 }
 
 TPTEST(ClusteringRaft, Basic) {
@@ -397,7 +473,7 @@ TPTEST(ClusteringRaft, Basic) {
     dummy_raft_cluster_t cluster(5, dummy_raft_state_t(), nullptr);
     raft_member_id_t leader = cluster.find_leader(60000);
     /* Do some writes and check the result */
-    do_writes(&cluster, leader, 2000, 100);
+    do_writes(&cluster, leader, 2000, 30);
 }
 
 TPTEST(ClusteringRaft, Failover) {
@@ -405,22 +481,22 @@ TPTEST(ClusteringRaft, Failover) {
     dummy_raft_cluster_t cluster(5, dummy_raft_state_t(), &member_ids);
     dummy_raft_traffic_generator_t traffic_generator(&cluster, 3);
     raft_member_id_t leader = cluster.find_leader(60000);
-    do_writes(&cluster, leader, 2000, 100);
-    cluster.set_live(member_ids[0], dummy_raft_cluster_t::live_t::dead);
-    cluster.set_live(member_ids[1], dummy_raft_cluster_t::live_t::dead);
+    do_writes(&cluster, leader, 2000, 30);
+    cluster.set_live(member_ids[0], dead_or_isolated());
+    cluster.set_live(member_ids[1], dead_or_isolated());
     leader = cluster.find_leader(60000);
-    do_writes(&cluster, leader, 2000, 100);
-    cluster.set_live(member_ids[2], dummy_raft_cluster_t::live_t::dead);
-    cluster.set_live(member_ids[3], dummy_raft_cluster_t::live_t::dead);
+    do_writes(&cluster, leader, 2000, 30);
+    cluster.set_live(member_ids[2], dead_or_isolated());
+    cluster.set_live(member_ids[3], dead_or_isolated());
     cluster.set_live(member_ids[0], dummy_raft_cluster_t::live_t::alive);
     cluster.set_live(member_ids[1], dummy_raft_cluster_t::live_t::alive);
     leader = cluster.find_leader(60000);
-    do_writes(&cluster, leader, 2000, 100);
-    cluster.set_live(member_ids[4], dummy_raft_cluster_t::live_t::dead);
+    do_writes(&cluster, leader, 2000, 30);
+    cluster.set_live(member_ids[4], dead_or_isolated());
     cluster.set_live(member_ids[2], dummy_raft_cluster_t::live_t::alive);
     cluster.set_live(member_ids[3], dummy_raft_cluster_t::live_t::alive);
     leader = cluster.find_leader(60000);
-    do_writes(&cluster, leader, 2000, 100);
+    do_writes(&cluster, leader, 2000, 30);
     ASSERT_LT(100, traffic_generator.get_num_changes());
     cluster.run_on_member(leader, [&](dummy_raft_member_t *member, signal_t *) {
         dummy_raft_state_t state = member->get_committed_state()->get().state;
