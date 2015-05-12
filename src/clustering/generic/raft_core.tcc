@@ -1705,11 +1705,17 @@ void raft_member_t<state_t>::leader_continue_reconfiguration(
     in which we are no longer leader. */
     if (!committed_state.get_ref().config.is_valid_leader(this_member_id)) {
         /* Raft paper, Section 6: "...the leader steps down (returns to follower state)
-        once it has committed the C_new log entry."
-        `candidate_or_leader_note_term()` isn't designed for the purpose of making us
+        once it has committed the C_new log entry." */
+        if (!log_prefix.empty()) {
+            logINF("%s: Stepping down as Raft leader because we're no longer a Raft "
+                "voter.", log_prefix.c_str());
+        }
+
+        /* `candidate_or_leader_note_term()` isn't designed for the purpose of making us
         intentionally step down, but it contains all the right logic. This has a side
         effect of incrementing `current_term`, but I don't think that's a problem. */
         candidate_or_leader_note_term(ps.current_term + 1, mutex_acq);
+
     } else if (committed_state.get_ref().config.is_joint_consensus() &&
             latest_state.get_ref().config.is_joint_consensus()) {
         /* OK, we recently committed a joint consensus configuration, but we haven't yet
