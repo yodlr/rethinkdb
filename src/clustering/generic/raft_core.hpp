@@ -731,22 +731,30 @@ private:
     modified. */
     void update_readiness_for_change();
 
-    /* `start_election_and_leader_coro()` moves us from the `follower_led` state to the
-    `follower_unled` state and spawns `election_and_leader_coro()`, which will start a
-    new election after a random timeout. It also sets `last_heard_from_candidate`, to
-    make it hard for people to forget to set it. */
+    /* `start_election_and_leader_coro()` spawns `election_and_leader_coro()`, which will
+    start a new election after a random timeout. The caller must have already put us into
+    the `follower_unled` state and set up `last_heard_from_candidate` if appropriate. */
     void start_election_and_leader_coro(
-        microtime_t new_last_heard_from_candidate,
         const new_mutex_acq_t *mutex_acq);
 
-    /* `stop_election_and_leader_coro()` moves us from the `follower_unled`, `candidate`,
-    or `leader`, state to `follower_led` state. It interrupts
-    `election_and_leader_coro()` and blocks until the coro exits. If we were in the
-    `leader` state before, it also sends out StepDown RPCs so the other nodes know we're
-    no longer acting as leader. Note that if `stop_election_and_leader_coro()` is
-    interrupted, the `raft_member_t` must be destroyed soon after, or else the Raft
-    cluster might lose availability until it is. */
+    /* `stop_election_and_leader_coro()` stops `election_and_leader_coro()`
+    and blocks until the coro exits. If we were in the `leader` state before, it also
+    sends out StepDown RPCs so the other nodes know we're no longer acting as leader. It
+    leaves `mode` set to `follower_unled`, so the caller must either change `mode` to
+    `follower_led` or call `start_election_and_leader_coro()` in order to regain the
+    invariant that `election_and_leader_coro()` is running unless we are in the
+    `follower_led` state. */
     void stop_election_and_leader_coro(
+        const new_mutex_acq_t *mutex_acq,
+        signal_t *interruptor);
+
+    /* `update_term_and_reset_election_and_leader_coro()` is equivalent to calling
+    `stop_election_and_leader_coro()`, `update_term()`, and
+    `start_election_and_leader_coro()` all in a row, except that if we were in the
+    `follower_unled` or `candidate` state before it doesn't modify
+    `last_heard_from_candidate`. */
+    void update_term_and_reset_election_and_leader_coro(
+        raft_term_t new_term,
         const new_mutex_acq_t *mutex_acq,
         signal_t *interruptor);
 
@@ -861,18 +869,21 @@ private:
     transition from `follower_led` to `follower_unled`. */
     raft_member_id_t current_term_leader_id;
 
-    /* `current_term_leader_stepped_down` is `true` if we received a StepDown RPC from
-    the member mentioned in `current_term_leader_id` during this term. If this is `true`,
-    we won't interpret further AppendEntries or InstallSnapshot RPCs this term as
-    evidence of a living leader. */
-    bool current_term_leader_stepped_down;
+    /* `current_term_leader_invalid` is `true` if we received a StepDown RPC or
+    disconnection event for the member mentioned in `current_term_leader_id` during this
+    term. If this is `true`, we won't interpret further AppendEntries or InstallSnapshot
+    RPCs this term as evidence of a living leader. */
+    bool current_term_leader_invalid;
 
-    /* `last_heard_from_candidate` is the time at which we last received a valid RPC from
-    a candidate or last believed a leader existed. If we are in the `follower_unled`
-    state and an election timeout has elapsed since `last_heard_from_candidate`, we will
-    transition to candidate state and start an election. This variable is meaningless if
-    we are in the `follower_led` state. */
-    microtime_t last_heard_from_candidate;
+    /* `last_leader_time` is the time at which we last received a valid RPC from a
+    candidate or last believed a leader existed. If we are in the `follower_unled` state
+    and an election timeout has elapsed since `last_leader_time`, we will transition to
+    candidate state and start an election. If we are in the `follower_led` or `leader`
+    state, we belive a candidate to currently exist, and `last_leader_time` will be
+    set to the special value `LEADER_EXISTS_NOW`. When we transition into the
+    `follower_unled` state we will set it to the current time. */
+    static const boost::optional<microtime_t> LEADER_EXISTS_NOW;
+    boost::optional<microtime_t> last_leader_time;
 
     /* `match_indexes` corresponds to the `matchIndex` array described in Figure 2 of the
     Raft paper. Note that it is only used if we are the leader; if we are not the leader,

@@ -60,7 +60,7 @@ raft_member_t<state_t>::raft_member_t(
     /* We'll update `latest_state` with the contents of the log shortly */
     latest_state(committed_state.get_ref()),
     current_term_leader_id(nil_uuid()),
-    current_term_leader_stepped_down(false),
+    current_term_leader_invalid(false),
     /* These must be false initially because we're a follower. */
     readiness_for_change(false),
     readiness_for_config_change(false),
@@ -79,11 +79,15 @@ raft_member_t<state_t>::raft_member_t(
         return !ps.log.entries.empty();
     });
 
-    /* Raft paper, Section 5.2: "When servers start up, they begin as followers."
-    We immediately call `start_election_and_leader_coro()`, which will start an election
-    unless we hear from a leader soon. The only reason to set `mode` to `follower_led` is
-    because `start_election_and_leader_coro()` asserts that it's in that state. */
-    mode = mode_t::follower_led;
+    /* Raft paper, Section 5.2: "When servers start up, they begin as followers." */
+    mode = mode_t::follower_unled;
+
+    /* Initialize `last_leader_time` such that we start an election after one election
+    timeout has elapsed. */
+    last_leader_time = boost::make_optional(current_microtime());
+
+    /* We immediately call `start_election_and_leader_coro()`, which will start an
+    election unless we hear from a leader soon. */
     start_election_and_leader_coro(&mutex_acq);
 
     DEBUG_ONLY_CODE(check_invariants(&mutex_acq));
@@ -350,8 +354,6 @@ void raft_member_t<state_t>::on_request_vote_rpc(
     connectivity detection to detect if a leader is disconnected, rather than using
     timeouts. */
     if (mode == mode_t::leader || mode == mode_t::follower_led) {
-        debugf("%s RequestVote %s reject because led\n", show(this_member_id).c_str(),
-            show(request.candidate_id).c_str());
         reply_out->term = ps.current_term;
         reply_out->vote_granted = false;
         return;
@@ -360,20 +362,20 @@ void raft_member_t<state_t>::on_request_vote_rpc(
     /* Raft paper, Figure 2: If RPC request or response contains term T > currentTerm:
     set currentTerm = T, convert to follower */
     if (request.term > ps.current_term) {
-        debugf("%s RequestVote %s later term\n", show(this_member_id).c_str(),
-            show(request.candidate_id).c_str());
         /* We kill the `election_and_leader_coro()` if it's running, but the immediately
         respawn it again. This will put us in the `follower_unled` state with a timer
         counting down to start a new election. */
-        if (mode != mode_t::follower_led) {
-            /* Interrupting `stop_election_and_leader_coro()` is safe here because if
-            `on_*_rpc()` is interrupted, the `raft_member_t` will be destroyed soon
-            anyway. Note we do this before we update the term, so the leader step-down
-            logic sees the right term. */
-            stop_election_and_leader_coro(&mutex_acq, interruptor);
-        }
+
+        /* Interrupting `stop_election_and_leader_coro()` is safe here because if
+        `on_*_rpc()` is interrupted, the `raft_member_t` will be destroyed soon
+        anyway. Note we do this before we update the term, so the leader step-down
+        logic sees the right term. */
+        stop_election_and_leader_coro(&mutex_acq, interruptor);
+
         update_term(request.term, &mutex_acq);
+
         start_election_and_leader_coro(&mutex_acq);
+
         guarantee(mode == mode_t::follower_unled);
         /* Continue processing the RPC as `follower_unled` */
     }
@@ -424,6 +426,12 @@ void raft_member_t<state_t>::on_request_vote_rpc(
 
     ps.voted_for = request.candidate_id;
 
+    /* Only once we confirm that the RPC is valid do we update `last_leader_time`. It's
+    important that if the RPC is invalid, we don't reset `last_leader_time`, because
+    otherwise if there is only one Raft member that's eligible to become leader it might
+    never stand for election because it kept getting RPCs from ineligible candidates. */
+    last_leader_time = boost::make_optional(current_microtime());
+
     /* Raft paper, Figure 2: "Persistent state [is] updated on stable storage before
     responding to RPCs" */
     storage->write_persistent_state(ps, interruptor);
@@ -446,14 +454,16 @@ void raft_member_t<state_t>::on_install_snapshot_rpc(
     /* Raft paper, Figure 2: If RPC request or response contains term T > currentTerm:
     set currentTerm = T, convert to follower */
     if (request.term > ps.current_term) {
-        debugf("%s InstallSnapshot %s later term\n", show(this_member_id).c_str(),
-            show(request.leader_id).c_str());
         if (mode != mode_t::follower_led) {
             /* Interrupting `stop_election_and_leader_coro()` is safe here because if
             `on_*_rpc()` is interrupted, the `raft_member_t` will be destroyed soon
             anyway. Note we do this before we update the term, so the leader step-down
             logic sees the right term. */
             stop_election_and_leader_coro(&mutex_acq, interruptor);
+            guarantee(mode == mode_t::follower_unled);
+
+            mode = mode_t::follower_led;
+            last_leader_time = LEADER_EXISTS_NOW;
         }
         update_term(request.term, &mutex_acq);
         /* Continue processing the RPC as `follower_led` */
@@ -487,14 +497,16 @@ void raft_member_t<state_t>::on_install_snapshot_rpc(
     This implementation deviates from the Raft paper in that once we receive a valid RPC
     from a leader, we assume the leader remains alive until it disconnects or sends a
     StepDown RPC. We do this by transitioning to the `follower_led` state. */
-    if ((mode == mode_t::follower_unled && !current_term_leader_stepped_down)
+    if ((mode == mode_t::follower_unled && !current_term_leader_invalid)
             || mode == mode_t::candidate) {
-        debugf("%s InstallSnapshot %s override\n", show(this_member_id).c_str(),
-            show(request.leader_id).c_str());
         /* Interrupting `stop_election_and_leader_coro()` is safe here because if
         `on_*_rpc()` is interrupted, the `raft_member_t` will be destroyed soon
         anyway. */
         stop_election_and_leader_coro(&mutex_acq, interruptor);
+        guarantee(mode == mode_t::follower_unled);
+
+        mode = mode_t::follower_led;
+        last_leader_time = LEADER_EXISTS_NOW;
     }
 
     /* Recall that `current_term_leader_id` is set to `nil_uuid()` if we haven't seen a
@@ -603,14 +615,16 @@ void raft_member_t<state_t>::on_append_entries_rpc(
     /* Raft paper, Figure 2: "If RPC request or response contains term T > currentTerm:
     set currentTerm = T, convert to follower" */
     if (request.term > ps.current_term) {
-        debugf("%s AppendEntries %s later term\n", show(this_member_id).c_str(),
-            show(request.leader_id).c_str());
         if (mode != mode_t::follower_led) {
             /* Interrupting `stop_election_and_leader_coro()` is safe here because if
             `on_*_rpc()` is interrupted, the `raft_member_t` will be destroyed soon
             anyway. Note we do this before we update the term, so the leader step-down
             logic sees the right term. */
             stop_election_and_leader_coro(&mutex_acq, interruptor);
+            guarantee(mode == mode_t::follower_unled);
+
+            mode = mode_t::follower_led;
+            last_leader_time = LEADER_EXISTS_NOW;
         }
         update_term(request.term, &mutex_acq);
         /* Continue processing the RPC as follower */
@@ -646,14 +660,16 @@ void raft_member_t<state_t>::on_append_entries_rpc(
     This implementation deviates from the Raft paper in that once we receive a valid RPC
     from a leader, we assume the leader remains alive until it disconnects or sends a
     StepDown RPC. We do this by transitioning to the `follower_led` state. */
-    if ((mode == mode_t::follower_unled && !current_term_leader_stepped_down)
+    if ((mode == mode_t::follower_unled && !current_term_leader_invalid)
             || mode == mode_t::candidate) {
-        debugf("%s AppendEntries %s override\n", show(this_member_id).c_str(),
-            show(request.leader_id).c_str());
         /* Interrupting `stop_election_and_leader_coro()` is safe here because if
         `on_*_rpc()` is interrupted, the `raft_member_t` will be destroyed soon anyway.
         */
         stop_election_and_leader_coro(&mutex_acq, interruptor);
+        guarantee(mode == mode_t::follower_unled);
+
+        mode = mode_t::follower_led;
+        last_leader_time = LEADER_EXISTS_NOW;
     }
 
     /* Recall that `current_term_leader_id` is set to `nil_uuid()` if we haven't seen a
@@ -750,20 +766,23 @@ void raft_member_t<state_t>::on_step_down_rpc(
     new term, so we would find out eventually. But we might as well act on the new
     information now. */
     if (request.term > ps.current_term) {
-        debugf("%s StepDown later term\n", show(this_member_id).c_str());
-        /* We kill the `election_and_leader_coro()` if it's running, but the immediately
-        respawn it again. This will put us in the `follower_unled` state with a timer
-        counting down to start a new election. */
-        if (mode != mode_t::follower_led) {
+        if (mode == mode_t::follower_led) {
+            mode = mode_t::follower_unled;
+            last_leader_time = boost::make_optional(current_microtime());
+        } else {
+            /* We kill the `election_and_leader_coro()`, but then immediately respawn it
+            again. This will put us in the `follower_unled` state with a timer counting
+            down to start a new election. */
+
             /* Interrupting `stop_election_and_leader_coro()` is safe here because if
             `on_*_rpc()` is interrupted, the `raft_member_t` will be destroyed soon
             anyway. Note we do this before we update the term, so the leader step-down
             logic sees the right term. */
             stop_election_and_leader_coro(&mutex_acq, interruptor);
         }
+        guarantee(mode == mode_t::follower_unled);
         update_term(request.term, &mutex_acq);
         start_election_and_leader_coro(&mutex_acq);
-        guarantee(mode == mode_t::follower_unled);
         /* Continue processing the RPC as `follower_unled` */
     }
 
@@ -779,11 +798,11 @@ void raft_member_t<state_t>::on_step_down_rpc(
     `follower_led` state, we transition to the `follower_unled` state because we just
     found out the leader is no longer valid. */
     if (mode == mode_t::follower_led) {
-        debugf("%s StepDown leader %s\n", show(this_member_id).c_str(),
-            show(request.leader_id).c_str());
         guarantee(request.leader_id == current_term_leader_id
             || current_term_leader_id.is_nil());
-        current_term_leader_stepped_down = true;
+        current_term_leader_invalid = true;
+        mode = mode_t::follower_unled;
+        last_leader_time = boost::make_optional(current_microtime());
         start_election_and_leader_coro(&mutex_acq);
     }
 
@@ -904,16 +923,18 @@ void raft_member_t<state_t>::check_invariants(
         "snapshot changes as soon as they're applied");
 
     /* Checks related to the follower/candidate/leader roles */
+
     guarantee((mode == mode_t::leader) == (current_term_leader_id == this_member_id),
         "mode should say we're leader iff current_term_leader_id says we're leader");
-    /* We could test that `current_term_leader_id` is non-nil if there are any changes in
-    the log for the current term. But this would be false immediately after startup, so
-    we'd need an extra flag to detect that, and that's more work than it's worth. */
+    guarantee((mode == mode_t::leader || mode == mode_t::follower_led)
+        == (last_leader_time == LEADER_EXISTS_NOW),
+        "last_leader_time should say leader is ongoing iff mode says leader is ongoing");
     guarantee(election_and_leader_drainer.has() == (mode != mode_t::follower_led),
         "election_and_leader_coro() should be running unless we're a follower_led");
+
     switch (mode) {
     case mode_t::follower_led:
-        guarantee(!current_term_leader_id.is_nil() && !current_term_leader_stepped_down,
+        guarantee(!current_term_leader_id.is_nil() && !current_term_leader_invalid,
             "If we don't think there's a leader, we should be in follower_unled state.");
         guarantee(match_indexes.empty(), "If we're a follower, `match_indexes` should "
             "be empty.");
@@ -925,7 +946,7 @@ void raft_member_t<state_t>::check_invariants(
     case mode_t::candidate:
         guarantee(current_term_leader_id.is_nil(), "if we have a leader we shouldn't be "
             "having an election");
-        guarantee(!current_term_leader_stepped_down, "if there was already a leader "
+        guarantee(!current_term_leader_invalid, "if there was already a leader "
             "this term we shouldn't be having an election");
         guarantee(ps.voted_for == this_member_id, "if we're a candidate we should have "
             "voted for ourself");
@@ -935,7 +956,7 @@ void raft_member_t<state_t>::check_invariants(
     case mode_t::leader:
         guarantee(ps.voted_for == this_member_id, "if we're a leader we should have "
             "voted for ourself");
-        guarantee(!current_term_leader_stepped_down, "if we're currently a leader we "
+        guarantee(!current_term_leader_invalid, "if we're currently a leader we "
             "shouldn't think we've stepped down");
         guarantee(latest_term_in_log == ps.current_term, "if we're a leader we should "
             "have put at least the initial noop entry in the log");
@@ -946,6 +967,10 @@ void raft_member_t<state_t>::check_invariants(
     default:
         unreachable();
     }
+
+    /* We could test that `current_term_leader_id` is non-nil if there are any changes in
+    the log for the current term. But this would be false immediately after startup, so
+    we'd need an extra flag to detect that, and that's more work than it's worth. */
 }
 
 template<class state_t>
@@ -971,8 +996,9 @@ void raft_member_t<state_t>::on_connected_members_change(
                         message represented by this coroutine is out of date. */
                         return;
                     }
-                    debugf("%s leader %s disconnected\n", show(this_member_id).c_str(),
-                        show(current_term_leader_id).c_str());
+                    current_term_leader_invalid = true;
+                    mode = mode_t::follower_unled;
+                    last_leader_time = boost::make_optional(current_microtime());
                     start_election_and_leader_coro(&mutex_acq);
                 } catch (const interrupted_exc_t &) {
                     /* ignore */
@@ -1028,9 +1054,9 @@ void raft_member_t<state_t>::update_term(
     ps.voted_for = raft_member_id_t();
 
     /* The same logic applies to `current_term_leader_id` and
-    `current_term_leader_stepped_down`. */
+    `current_term_leader_invalid`. */
     current_term_leader_id = raft_member_id_t();
-    current_term_leader_stepped_down = false;
+    current_term_leader_invalid = false;
 }
 
 template<class state_t>
@@ -1149,17 +1175,12 @@ void raft_member_t<state_t>::update_readiness_for_change() {
                 peers.insert(member_id);
             });
         if (latest_state.get_ref().config.is_quorum(peers)) {
-            debugf("%s RFC=true\n", show(this_member_id).c_str());
             readiness_for_change.set_value(true);
             readiness_for_config_change.set_value(
                 !committed_state.get_ref().config.is_joint_consensus() &&
                 !latest_state.get_ref().config.is_joint_consensus());
             return;
-        } else {
-            debugf("%s RFC=false (not quorum)\n", show(this_member_id).c_str());
         }
-    } else {
-        debugf("%s RFC=false (not leader)\n", show(this_member_id).c_str());
     }
     readiness_for_change.set_value(false);
     readiness_for_config_change.set_value(false);
@@ -1174,13 +1195,11 @@ template<class state_t>
 void raft_member_t<state_t>::start_election_and_leader_coro(
         const new_mutex_acq_t *mutex_acq) {
     mutex_acq->guarantee_is_holding(&mutex);
-    guarantee(mode == mode_t::follower_led);
+    guarantee(mode == mode_t::follower_unled);
+    guarantee(last_leader_time != LEADER_EXISTS_NOW);
     guarantee(!election_and_leader_drainer.has());
 
-    debugf("%s start_election_and_leader_coro()\n", show(this_member_id).c_str());
-
     election_and_leader_drainer.init(new auto_drainer_t);
-    mode = mode_t::follower_unled;
     coro_t::spawn_sometime(std::bind(
         &raft_member_t<state_t>::election_and_leader_coro,
         this,
@@ -1196,8 +1215,6 @@ void raft_member_t<state_t>::stop_election_and_leader_coro(
         mode == mode_t::candidate || mode == mode_t::leader);
     guarantee(election_and_leader_drainer.has());
 
-    debugf("%s stop_election_and_leader_coro()\n", show(this_member_id).c_str());
-
     bool was_leader = (mode == mode_t::leader);
 
     /* This will interrupt `election_and_leader_coro()` and block until it exits. We do
@@ -1207,7 +1224,7 @@ void raft_member_t<state_t>::stop_election_and_leader_coro(
     election_and_leader_drainer.reset();
 
     /* `election_and_leader_coro()` should have reset `mode` when it exited */
-    guarantee(mode == mode_t::follower_led);
+    guarantee(mode == mode_t::follower_unled);
 
     if (was_leader) {
         /* Send step-down RPCs to every known member so they know we're no longer acting
@@ -1255,17 +1272,25 @@ void raft_member_t<state_t>::election_and_leader_coro(
 
     /* This `try` block is to catch `interrupted_exc_t` */
     try {
-        /* Unless we're in the `follower_led` state, we'll never update our log in
-        response to an RPC. So we can hold this mutex to assert that's true. */
-        mutex_assertion_t::acq_t log_mutex_acq(&log_mutex);
-
         /* `election_and_leader_coro()` starts when we lose contact with the last known
-        leader, or when we receive a RequestVote RPC. In either case, we wait a random
-        timeout, and if we aren't interrupted by the end of the timeout, we start an
+        leader, or when we receive a RequestVote RPC. In either case, we wait until a
+        random amount of time has elapsed since `last_leader_time`, and then we begin an
         election. */
-        nap(election_timeout_min_ms +
-                randuint64(election_timeout_max_ms - election_timeout_min_ms),
-            leader_keepalive.get_drain_signal());
+        {
+            uint64_t election_timeout = election_timeout_min_ms +
+                randuint64(election_timeout_max_ms - election_timeout_min_ms);
+            microtime_t now = current_microtime();
+            if (*last_leader_time > now) {
+                /* The system clock ran backwards. Reset `last_leader_time` so the
+                election still happens in a reasonable time. */
+                last_leader_time = boost::make_optional(now);
+            }
+            int64_t sleep_ms =
+                (*last_leader_time + election_timeout * 1000 - now) / 1000;
+            if (sleep_ms > 0) {
+                nap(sleep_ms, leader_keepalive.get_drain_signal());
+            }
+        }
 
         scoped_ptr_t<new_mutex_acq_t> mutex_acq(
             new new_mutex_acq_t(&mutex, leader_keepalive.get_drain_signal()));
@@ -1274,7 +1299,6 @@ void raft_member_t<state_t>::election_and_leader_coro(
         a RPC that interrupts `election_and_leader_coro()` instead of starting an
         election. */
         if (!latest_state.get_ref().config.is_valid_leader(this_member_id)) {
-            debugf("%s not valid leader\n", show(this_member_id).c_str());
             mutex_acq.reset();
             cond_t never_pulsed;
             wait_interruptible(&never_pulsed, leader_keepalive.get_drain_signal());
@@ -1293,10 +1317,13 @@ void raft_member_t<state_t>::election_and_leader_coro(
 
         mode = mode_t::candidate;
 
+        /* When in the `candidate` or `leader` state, we'll never update our log in
+        response to an RPC. So we can hold this mutex to assert that's true. */
+        mutex_assertion_t::acq_t log_mutex_acq(&log_mutex);
+
         /* The first election won't necessarily succeed. So we loop until either we
         become leader or we are interrupted. */
         while (true) {
-            debugf("%s starting election\n", show(this_member_id).c_str());
             signal_timer_t election_timeout;
             election_timeout.start(
                 /* Choose a random timeout between `election_timeout_min_ms` and
@@ -1328,7 +1355,6 @@ void raft_member_t<state_t>::election_and_leader_coro(
 
         /* We got elected. */
         guarantee(mode == mode_t::leader);
-        debugf("%s won election\n", show(this_member_id).c_str());
 
         if (!log_prefix.empty()) {
             logINF("%s: This server is Raft leader for term %lu. Latest log index is "
@@ -1439,7 +1465,12 @@ void raft_member_t<state_t>::election_and_leader_coro(
         revert to `follower_led` state. In either case we do the same thing. */
     }
 
-    mode = mode_t::follower_led;
+    /* When switching `mode` away from `leader`, we must reset `last_leader_time` */
+    if (mode == mode_t::leader) {
+        last_leader_time = boost::make_optional(current_microtime());
+    }
+
+    mode = mode_t::follower_unled;
 
     /* `match_indexes` is supposed to be empty when we're not leader. This rule isn't
     strictly necessary; it's basically a sanity check. */
@@ -1469,6 +1500,10 @@ bool raft_member_t<state_t>::candidate_run_election(
         our own vote might be enough to be elected. */
         we_won_the_election.pulse();
     }
+
+    /* Since we "heard from a valid candidate" (ourselves), we update
+    `last_leader_time` */
+    last_leader_time = boost::make_optional(current_microtime());
 
     /* Flush to stable storage so we don't forget we voted for ourself. I'm not sure if
     this is strictly necessary. */
@@ -1589,6 +1624,7 @@ bool raft_member_t<state_t>::candidate_run_election(
         `mode == mode_t::candidate`. */
         request_vote_drainer.reset();
         mode = mode_t::leader;
+        last_leader_time = LEADER_EXISTS_NOW;
         return true;
     } else {
         return false;
@@ -1826,7 +1862,7 @@ void raft_member_t<state_t>::leader_send_updates(
                 }
                 send_even_if_empty = false;
 
-            } else {
+            } else if (!send_even_if_empty) {
                 guarantee(next_index == ps.log.get_latest_index() + 1);
                 guarantee(member_commit_index == committed_state.get_ref().log_index);
                 /* OK, the peer is completely up-to-date. Wait until either an entry is
@@ -1905,7 +1941,7 @@ template<class state_t>
 bool raft_member_t<state_t>::candidate_or_leader_note_term(
         raft_term_t term, const new_mutex_acq_t *mutex_acq) {
     mutex_acq->guarantee_is_holding(&mutex);
-    guarantee(mode != mode_t::follower_led && mode != mode_t::follower_unled);
+    guarantee(mode == mode_t::candidate || mode == mode_t::leader);
     /* Raft paper, Figure 2: If RPC request or response contains term T > currentTerm:
     set currentTerm = T, convert to follower */
     if (term > ps.current_term) {
@@ -1990,6 +2026,10 @@ void raft_member_t<state_t>::leader_append_log_entry(
     on our disk yet, and it's not obvious whether that is safe. */
     storage->write_persistent_state(ps, interruptor);
 }
+
+template<class state_t>
+const boost::optional<microtime_t> raft_member_t<state_t>::LEADER_EXISTS_NOW
+    = boost::none;
 
 #endif /* CLUSTERING_GENERIC_RAFT_CORE_TCC_ */
 
