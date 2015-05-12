@@ -389,7 +389,25 @@ private:
             term, leader_id, entries, leader_commit);
     };
 
-    boost::variant<request_vote_t, install_snapshot_t, append_entries_t> request;
+    /* This implementation deviates from the Raft paper in that we use the RPC layer's
+    connection timeouts to detect failed leaders instead of using heartbeats. However,
+    sometimes a leader will stop being leader without losing the connection to the other
+    nodes. In this case, we need some other way to tell the other nodes that the leader
+    is no longer active. The solution is a new type of RPC that doesn't appear in the
+    Raft paper: the "StepDown RPC". Any time a leader ceases to be leader, it will send a
+    StepDown RPC to every member of the Raft cluster. */
+    class step_down_t {
+    public:
+        /* `leader_id` is the ID of the node that is stepping down, and `term` is the
+        term that it was acting as leader for. */
+        raft_term_t term;
+        raft_member_id_t leader_id;
+        RDB_MAKE_ME_SERIALIZABLE_2(step_down_t,
+            term, leader_id);
+    };
+
+    boost::variant<request_vote_t, install_snapshot_t, append_entries_t, step_down_t>
+        request;
 
     RDB_MAKE_ME_SERIALIZABLE_1(raft_rpc_request_t, request);
 };
@@ -425,7 +443,15 @@ private:
         RDB_MAKE_ME_SERIALIZABLE_2(append_entries_t, term, success);
     };
 
-    boost::variant<request_vote_t, install_snapshot_t, append_entries_t> reply;
+    /* `step_down_t` is the reply to a StepDown RPC; it doesn't appear in the Raft paper.
+    See the note for `raft_rpc_request_t::step_down_t`. */
+    class step_down_t {
+    public:
+        RDB_MAKE_ME_SERIALIZABLE_0(step_down_t);
+    };
+
+    boost::variant<request_vote_t, install_snapshot_t, append_entries_t, step_down_t>
+        reply;
 
     RDB_MAKE_ME_SERIALIZABLE_1(raft_rpc_reply_t, reply);
 };
@@ -478,11 +504,11 @@ public:
 
     ~raft_member_t();
 
-    /* Note that if a method on `raft_member_t` is interrupted, the `raft_member_t` will
-    be left in an undefined internal state. Therefore, the destructor should be called
-    after the interruptor has been pulsed. (However, even though the internal state
-    is undefined, the interrupted method call will not make invalid RPC calls or write
-    invalid data to persistent storage.) */
+    /* Note that if any public method on `raft_member_t` is interrupted, the
+    `raft_member_t` will be left in an undefined internal state. Therefore, the
+    destructor should be called after the interruptor has been pulsed. (However, even
+    though the internal state is undefined, the interrupted method call will not make
+    invalid RPC calls or write invalid data to persistent storage.) */
 
     /* `state_and_config_t` describes the Raft cluster's current state, configuration,
     and log index all in the same struct. The reason for putting them in the same struct
@@ -616,28 +642,25 @@ public:
         const std::set<raft_member_t<state_t> *> &members);
 
 private:
+    /* The Raft paper describes three states: "follower", "candidate", and "leader". We
+    split the "follower" state into two sub-states depending on whether we believe that a
+    leader exists or not. */
     enum class mode_t {
-        follower,
+        follower_led,
+        follower_unled,
         candidate,
         leader
     };
 
     /* These are the minimum and maximum election timeouts. In section 5.6, the Raft
     paper suggests that a typical election timeout should be somewhere between 10ms and
-    500ms. We use somewhat larger numbers to reduce server traffic, at the cost of longer
-    periods of unavailability when a master dies. */
+    500ms. We choose relatively long timeouts because immediate availability is not
+    important, and we want to avoid a cycle of repeated failed elections. (This
+    implementation deviates from the Raft paper in that we use the RPC layer's
+    connectivity detection to determine if we need to start a new election, so these are
+    actually the timeouts after the leader is determined to be dead.) */
     static const int32_t election_timeout_min_ms = 1000,
                          election_timeout_max_ms = 2000;
-
-    /* TODO: We should probably deviate from the Raft paper by using the network layer's
-    disconnect detection instead of timeouts to detect a dead leader. This will make
-    elections much faster and also make us less sensitive to timing. However, this will
-    involve adding a new RPC, for a master to inform followers that it is stepping down.
-    */
-
-    /* This is the amount of time the server waits between sending heartbeats. It should
-    be much shorter than the election timeout. */
-    static const int32_t heartbeat_interval_ms = 500;
 
     /* Note: Methods prefixed with `follower_`, `candidate_`, or `leader_` are methods
     that are only used when in that state. This convention will hopefully make the code
@@ -657,6 +680,10 @@ private:
         const typename raft_rpc_request_t<state_t>::append_entries_t &rpc,
         signal_t *interruptor,
         raft_rpc_reply_t::append_entries_t *reply_out);
+    void on_step_down_rpc(
+        const typename raft_rpc_request_t<state_t>::step_down_t &rpc,
+        signal_t *interruptor,
+        raft_rpc_reply_t::step_down_t *reply_out);
 
     /* Asserts that all of the invariants that can be checked locally hold true. This
     doesn't block or modify anything. It should be safe to call it at any time (except
@@ -665,10 +692,10 @@ private:
     because we know that the variables should be consistent at those times. */
     void check_invariants(const new_mutex_acq_t *mutex_acq);
 
-    /* `on_watchdog_timer()` is called periodically. If we're a follower and we haven't
-    heard from a leader within the election timeout, it starts a new election by spawning
-    `candidate_and_leader_coro()`. */
-    void on_watchdog_timer();
+    /* `on_connected_members_change()` is called when a member connects or disconnects.
+    */
+    void on_connected_members_change(
+        const raft_member_id_t &other_member_id, const empty_value_t *value);
 
     /* `apply_log_entries()` updates `state_and_config` with the entries from `log` with
     indexes `first <= index <= last`. */
@@ -704,23 +731,33 @@ private:
     modified. */
     void update_readiness_for_change();
 
-    /* `candidate_or_leader_become_follower()` moves us from the `candidate` or `leader`
-    state to `follower` state. It kills `candidate_and_leader_coro()` and blocks until it
-    exits. */
-    void candidate_or_leader_become_follower(const new_mutex_acq_t *mutex_acq);
+    /* `start_election_and_leader_coro()` moves us from the `follower_led` state to the
+    `follower_unled` state and spawns `election_and_leader_coro()`, which will start a
+    new election after a random timeout. It also sets `last_heard_from_candidate`, to
+    make it hard for people to forget to set it. */
+    void start_election_and_leader_coro(
+        microtime_t new_last_heard_from_candidate,
+        const new_mutex_acq_t *mutex_acq);
 
-    /* `follower_become_candidate()` moves us from the `follower` state to the
-    `candidate` state. It spawns `candidate_and_leader_coro()`.*/
-    void follower_become_candidate(const new_mutex_acq_t *mutex_acq);
+    /* `stop_election_and_leader_coro()` moves us from the `follower_unled`, `candidate`,
+    or `leader`, state to `follower_led` state. It interrupts
+    `election_and_leader_coro()` and blocks until the coro exits. If we were in the
+    `leader` state before, it also sends out StepDown RPCs so the other nodes know we're
+    no longer acting as leader. Note that if `stop_election_and_leader_coro()` is
+    interrupted, the `raft_member_t` must be destroyed soon after, or else the Raft
+    cluster might lose availability until it is. */
+    void stop_election_and_leader_coro(
+        const new_mutex_acq_t *mutex_acq,
+        signal_t *interruptor);
 
-    /* `candidate_and_leader_coro()` contains most of the candidate- and leader-specific
-    logic. It runs in a separate coroutine for as long as we are a candidate or leader.
-    */
-    void candidate_and_leader_coro(
-        /* A `new_mutex_acq_t` allocated on the heap. `candidate_and_leader_coro()` takes
-        ownership of it. */
-        new_mutex_acq_t *mutex_acq_on_heap,
-        /* To make sure that `candidate_and_leader_coro` stops before the `raft_member_t`
+    /* `election_and_leader_coro()` contains most of the candidate- and leader-specific
+    logic. When it begins, we are in the `follower_unled` state; it waits for a short
+    timeout, then begins an election and transitions us to the `candidate` state. If it
+    wins the elction, it transitions us to the `leader` state. If we are ever not in the
+    `follower_led` state, there must be an instance of `election_and_leader_coro()`
+    running. */
+    void election_and_leader_coro(
+        /* To make sure that `election_and_leader_coro` stops before the `raft_member_t`
         is destroyed. This is also used by `candidate_or_leader_become_follower()` to
         interrupt `candidate_and_leader_coro()`. */
         auto_drainer_t::lock_t leader_keepalive);
@@ -819,16 +856,23 @@ private:
     mode_t mode;
 
     /* `current_term_leader_id` is the ID of the member that is leader during this term.
-    If we haven't seen any node acting as leader this term, it's `nil_uuid()`. We use it
-    to redirect clients as described in Figure 2 and Section 8. */
+    If we haven't seen any node acting as leader this term, it's `nil_uuid()`. When a
+    member disconnects, we compare it to `current_term_leader_id` to decide if we should
+    transition from `follower_led` to `follower_unled`. */
     raft_member_id_t current_term_leader_id;
 
-    /* `last_heard_from_candidate` and `last_heard_from_leader` are the times we last
-    received a message from a candidate or leader. When `on_watchdog_timer()` is deciding
-    whether or not to start a new election, it uses the later of the two. The reason they
-    are separate is because `on_request_vote_rpc()` should only disregard RPCs if it
-    hasn't heard from a leader recently, even if it has heard from a candidate. */
-    microtime_t last_heard_from_candidate, last_heard_from_leader;
+    /* `current_term_leader_stepped_down` is `true` if we received a StepDown RPC from
+    the member mentioned in `current_term_leader_id` during this term. If this is `true`,
+    we won't interpret further AppendEntries or InstallSnapshot RPCs this term as
+    evidence of a living leader. */
+    bool current_term_leader_stepped_down;
+
+    /* `last_heard_from_candidate` is the time at which we last received a valid RPC from
+    a candidate or last believed a leader existed. If we are in the `follower_unled`
+    state and an election timeout has elapsed since `last_heard_from_candidate`, we will
+    transition to candidate state and start an election. This variable is meaningless if
+    we are in the `follower_led` state. */
+    microtime_t last_heard_from_candidate;
 
     /* `match_indexes` corresponds to the `matchIndex` array described in Figure 2 of the
     Raft paper. Note that it is only used if we are the leader; if we are not the leader,
@@ -866,20 +910,15 @@ private:
     this at all times. */
     mutex_assertion_t log_mutex;
 
-    /* This makes sure that `candidate_and_leader_coro()` stops when the `raft_member_t`
-    is destroyed. It's in a `scoped_ptr_t` so that
-    `candidate_or_leader_become_follower()` can destroy it to kill
-    `candidate_and_leader_coro()`. */
-    scoped_ptr_t<auto_drainer_t> leader_drainer;
+    /* This makes sure that `election_and_leader_coro()` stops when the `raft_member_t`
+    is destroyed. It's in a `scoped_ptr_t` so that `become_follower_led()` can destroy it
+    to kill `election_and_leader_coro()`. */
+    scoped_ptr_t<auto_drainer_t> election_and_leader_drainer;
 
     /* Occasionally we have to spawn miscellaneous coroutines. This makes sure that they
     all get stopped before the `raft_member_t` is destroyed. It's in a `scoped_ptr_t` so
     that the destructor can destroy it early. */
     scoped_ptr_t<auto_drainer_t> drainer;
-
-    /* This periodically calls `on_watchdog_timer()` to check if we need to start a new
-    election. It's in a `scoped_ptr_t` so that the destructor can destroy it early. */
-    scoped_ptr_t<repeating_timer_t> watchdog_timer;
 
     /* This calls `update_readiness_for_change()` whenever a peer connects or
     disconnects. */

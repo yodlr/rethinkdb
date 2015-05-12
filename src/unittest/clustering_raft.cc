@@ -104,6 +104,13 @@ public:
 
     /* `set_live()` puts the given member into the given state. */
     void set_live(const raft_member_id_t &member_id, live_t live) {
+        if (live == live_t::alive) {
+            debugf("%s set ALIVE\n", show(member_id).c_str());
+        } else if (live == live_t::dead) {
+            debugf("%s set DEAD\n", show(member_id).c_str());
+        } else {
+            debugf("%s set ISOLATED\n", show(member_id).c_str());
+        }
         member_info_t *i = members.at(member_id).get();
         if (i->rpc_drainer.has() && live != live_t::alive) {
             member_directory.delete_key(member_id);
