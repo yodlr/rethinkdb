@@ -456,6 +456,20 @@ private:
     RDB_MAKE_ME_SERIALIZABLE_1(raft_rpc_reply_t, reply);
 };
 
+/* `raft_network_session_id_t` is used to identify a period of uninterrupted network
+connectivity between two Raft members. All RPCs sent during a session will eventually be
+delivered, exactly once, unless the session ends. The default-constructed
+`raft_network_session_id_t` is never a valid session ID. */
+class raft_network_session_id_t {
+public:
+    raft_network_session_id_t() : uuid(nil_uuid()) { }
+    explicit raft_network_session_id_t(uuid_u u) : uuid(u) { }
+    bool is_nil() const { return uuid.is_nil(); }
+    bool operator==(const raft_network_session_id_t &o) const { return uuid == o.uuid; }
+    bool operator!=(const raft_network_session_id_t &o) const { return uuid != o.uuid; }
+    uuid_u uuid;
+};
+
 /* `raft_network_interface_t` is the abstract class that `raft_member_t` uses to send
 messages over the network. */
 template<class state_t>
@@ -469,18 +483,21 @@ public:
       * If something goes wrong, `send_rpc()` will return `false`. The RPC may or may not
         have been delivered in this case. The caller should wait until the Raft member is
         present in `get_connected_members()` before trying again.
+      * The `session` must be the current active session for that peer; if it is not, the
+        call will return `false` and the RPC will not be delivered. This is to avoid
+        ambiguity about which session the RPC is part of.
       * If the interruptor is pulsed, it throws `interrupted_exc_t`. The RPC may or may
         not have been delivered. */
     virtual bool send_rpc(
         const raft_member_id_t &dest,
+        const raft_network_session_id_t &session,
         const raft_rpc_request_t<state_t> &request,
         signal_t *interruptor,
         raft_rpc_reply_t *reply_out) = 0;
 
-    /* `get_connected_members()` returns the set of all Raft members for which an RPC is
-    likely to succeed. The values in the map should always be `nullptr`; the only reason
-    it's a map at all is that we don't have a `watchable_set_t` type. */
-    virtual watchable_map_t<raft_member_id_t, empty_value_t>
+    /* `get_connected_members()` returns the Raft member IDs that we can currently
+    contact over the network, and the session IDs of our sessions with them. */
+    virtual watchable_map_t<raft_member_id_t, raft_network_session_id_t>
         *get_connected_members() = 0;
 
 protected:
@@ -630,6 +647,7 @@ public:
     /* When a Raft member calls `send_rpc()` on its `raft_network_interface_t`, the RPC
     is sent across the network and delivered by calling `on_rpc()` at its destination. */
     void on_rpc(
+        const raft_network_session_id_t &connection_id,
         const raft_rpc_request_t<state_t> &request,
         signal_t *interruptor,
         raft_rpc_reply_t *reply_out);
@@ -671,18 +689,22 @@ private:
     /* `on_rpc()` calls one of these three methods depending on what type of RPC it
     received. */
     void on_request_vote_rpc(
+        const raft_network_session_id_t &session,
         const typename raft_rpc_request_t<state_t>::request_vote_t &rpc,
         signal_t *interruptor,
         raft_rpc_reply_t::request_vote_t *reply_out);
     void on_install_snapshot_rpc(
+        const raft_network_session_id_t &session,
         const typename raft_rpc_request_t<state_t>::install_snapshot_t &rpc,
         signal_t *interruptor,
         raft_rpc_reply_t::install_snapshot_t *reply_out);
     void on_append_entries_rpc(
+        const raft_network_session_id_t &session,
         const typename raft_rpc_request_t<state_t>::append_entries_t &rpc,
         signal_t *interruptor,
         raft_rpc_reply_t::append_entries_t *reply_out);
     void on_step_down_rpc(
+        const raft_network_session_id_t &session,
         const typename raft_rpc_request_t<state_t>::step_down_t &rpc,
         signal_t *interruptor,
         raft_rpc_reply_t::step_down_t *reply_out);
@@ -699,7 +721,8 @@ private:
     /* `on_connected_members_change()` is called when a member connects or disconnects.
     */
     void on_connected_members_change(
-        const raft_member_id_t &other_member_id, const empty_value_t *value);
+        const raft_member_id_t &other_member_id,
+        const raft_network_session_id_t *session);
 
     /* `apply_log_entries()` updates `state_and_config` with the entries from `log` with
     indexes `first <= index <= last`. */
@@ -872,11 +895,15 @@ private:
     transition from `follower_led` to `follower_unled`. */
     raft_member_id_t current_term_leader_id;
 
-    /* `current_term_leader_invalid` is `true` if we received a StepDown RPC or
-    disconnection event for the member mentioned in `current_term_leader_id` during this
-    term. If this is `true`, we won't interpret further AppendEntries or InstallSnapshot
-    RPCs this term as evidence of a living leader. (However, we will still process the
-    RPCs normally.) */
+    /* If we are in the `follower_led` state, `current_term_leader_session` contains the
+    network session ID which we think connects us to a valid leader. If this session is
+    interrupted, we will switch to `follower_unled`. */
+    boost::optional<raft_network_session_id_t> current_term_leader_session;
+
+    /* `current_term_leader_invalid` is `true` if we received a StepDown RPC for the
+    member mentioned in `current_term_leader_id` during this term. If this is `true`, we
+    won't interpret further AppendEntries or InstallSnapshot RPCs this term as evidence
+    of a living leader. (However, we will still process the RPCs normally.) */
     bool current_term_leader_invalid;
 
     /* `last_leader_time` is the time at which we last received a valid RPC from a

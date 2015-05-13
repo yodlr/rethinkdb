@@ -72,7 +72,7 @@ raft_member_t<state_t>::raft_member_t(
     readiness_for_config_change(false),
     drainer(new auto_drainer_t),
     connected_members_subs(
-        new watchable_map_t<raft_member_id_t, empty_value_t>::all_subs_t(
+        new watchable_map_t<raft_member_id_t, raft_network_session_id_t>::all_subs_t(
             network->get_connected_members(),
             std::bind(&raft_member_t::on_connected_members_change, this, ph::_1, ph::_2),
             false))
@@ -472,6 +472,7 @@ void raft_member_t<state_t>::on_request_vote_rpc(
 
 template<class state_t>
 void raft_member_t<state_t>::on_install_snapshot_rpc(
+        const raft_network_session_id_t &session_id,
         const typename raft_rpc_request_t<state_t>::install_snapshot_t &request,
         signal_t *interruptor,
         raft_rpc_reply_t::install_snapshot_t *reply_out) {
@@ -492,6 +493,7 @@ void raft_member_t<state_t>::on_install_snapshot_rpc(
 
             mode = mode_t::follower_led;
             last_leader_time = LEADER_EXISTS_NOW;
+            current_term_leader_session = boost::make_optional(session_id);
         }
         update_term(request.term, &mutex_acq);
         /* Continue processing the RPC as `follower_led` */
@@ -534,6 +536,7 @@ void raft_member_t<state_t>::on_install_snapshot_rpc(
 
         mode = mode_t::follower_led;
         last_leader_time = LEADER_EXISTS_NOW;
+        current_term_leader_session = boost::make_optional(session_id);
     }
 
     /* Recall that `current_term_leader_id` is set to `nil_uuid()` if we haven't seen a
@@ -632,6 +635,7 @@ void raft_member_t<state_t>::on_install_snapshot_rpc(
 
 template<class state_t>
 void raft_member_t<state_t>::on_append_entries_rpc(
+        const raft_network_session_id_t &session_id,
         const typename raft_rpc_request_t<state_t>::append_entries_t &request,
         signal_t *interruptor,
         raft_rpc_reply_t::append_entries_t *reply_out) {
@@ -652,6 +656,7 @@ void raft_member_t<state_t>::on_append_entries_rpc(
 
             mode = mode_t::follower_led;
             last_leader_time = LEADER_EXISTS_NOW;
+            current_term_leader_session = boost::make_optional(session_id);
         }
         update_term(request.term, &mutex_acq);
         /* Continue processing the RPC as follower */
@@ -696,6 +701,7 @@ void raft_member_t<state_t>::on_append_entries_rpc(
 
         mode = mode_t::follower_led;
         last_leader_time = LEADER_EXISTS_NOW;
+        current_term_leader_session = boost::make_optional(session_id);
     }
 
     /* Recall that `current_term_leader_id` is set to `nil_uuid()` if we haven't seen a
@@ -799,6 +805,7 @@ void raft_member_t<state_t>::on_step_down_rpc(
         if (mode == mode_t::follower_led) {
             mode = mode_t::follower_unled;
             last_leader_time = boost::make_optional(current_microtime());
+            current_term_leader_session = boost::none;
         } else {
             /* We kill the `election_and_leader_coro()`, but then immediately respawn it
             again. This will put us in the `follower_unled` state with a timer counting
@@ -833,6 +840,7 @@ void raft_member_t<state_t>::on_step_down_rpc(
         current_term_leader_invalid = true;
         mode = mode_t::follower_unled;
         last_leader_time = boost::make_optional(current_microtime());
+        current_term_leader_session = boost::none;
         start_election_and_leader_coro(&mutex_acq);
     }
 
@@ -967,6 +975,9 @@ void raft_member_t<state_t>::check_invariants(
         "we shouldn't be accepting changes if we're not leader");
     guarantee(!readiness_for_change.get() || readiness_for_config_change.get(),
         "we shouldn't be accepting config changes but not regular changes");
+    guarantee((mode == mode_t::follower_led) ==
+        static_cast<bool>(current_term_leader_connection),
+        "current_term_leader_connection is meaningful iff we're follower_led");
 
     switch (mode) {
     case mode_t::follower_led:
@@ -1013,7 +1024,8 @@ void raft_member_t<state_t>::check_invariants(
 
 template<class state_t>
 void raft_member_t<state_t>::on_connected_members_change(
-        const raft_member_id_t &other_member_id, const empty_value_t *value) {
+        const raft_member_id_t &other_member_id,
+        const raft_network_session_id_t *value) {
     if (mode == mode_t::leader) {
         /* Our readiness to accept changes depends on having access to a quorum of
         voters. So whenever a member connects or disconnects, we recompute that. */
@@ -1021,24 +1033,32 @@ void raft_member_t<state_t>::on_connected_members_change(
     } else if (mode == mode_t::follower_led) {
         /* We need to check if the leader disconnected, so we can transition to the
         `follower_unled` state. */
-        if (other_member_id == current_term_leader_id && value == nullptr) {
+        if (other_member_id == current_term_leader_id &&
+                (value == nullptr || *value != *current_term_leader_session)) {
             /* We need to acquire the mutex, but this callback isn't allowed to block,
             so we need to spawn a coroutine. */
             auto_drainer_t::lock_t keepalive(drainer.get());
-            raft_term_t term = ps.current_term;
-            coro_t::spawn_sometime([this, term, keepalive /* important to capture */]() {
+            raft_term_t temp_current_term = ps.current_term;
+            boost::optional<raft_network_session_id_t> temp_current_term_leader_session =
+                current_term_leader_session;
+            coro_t::spawn_sometime(
+                [this, temp_current_term, temp_current_term_leader_session,
+                    keepalive /* important to capture */]() {
                 try {
                     new_mutex_acq_t mutex_acq(&mutex, keepalive.get_drain_signal());
-                    if (ps.current_term != term || mode != mode_t::follower_led) {
+                    if (current_term_leader_session !=
+                            temp_current_term_leader_session) {
                         /* Something changed while we were waiting for the mutex, and the
                         message represented by this coroutine is out of date. */
                         return;
                     }
+                    guarantee(mode == mode_t::follower_led);
+                    guarantee(ps.current_term == temp_current_term);
                     RAFT_DEBUG_LOG("lost contact with leader %s for term %lu",
-                        show(current_term_leader_id).c_str(), term);
-                    current_term_leader_invalid = true;
+                        show(current_term_leader_id).c_str(), ps.current_term);
                     mode = mode_t::follower_unled;
                     last_leader_time = boost::make_optional(current_microtime());
+                    current_term_leader_session = boost::none;
                     start_election_and_leader_coro(&mutex_acq);
                 } catch (const interrupted_exc_t &) {
                     /* ignore */
@@ -1211,7 +1231,7 @@ void raft_member_t<state_t>::update_readiness_for_change() {
     if (mode == mode_t::leader) {
         std::set<raft_member_id_t> peers;
         network->get_connected_members()->read_all(
-            [&](const raft_member_id_t &member_id, const empty_value_t *) {
+            [&](const raft_member_id_t &member_id, const raft_network_session_id_t *) {
                 peers.insert(member_id);
             });
         if (latest_state.get_ref().config.is_quorum(peers)) {
@@ -1586,8 +1606,16 @@ bool raft_member_t<state_t>::candidate_run_election(
                 while (true) {
                     /* Don't bother trying to send an RPC until the peer is present in
                     `get_connected_members()`. */
+                    raft_network_session_id_t session_id;
                     network->get_connected_members()->run_key_until_satisfied(peer,
-                        [](const empty_value_t *x) { return x != nullptr; },
+                        [](const raft_network_session_id_t *x) {
+                            if (x != nullptr) {
+                                session_id = *x;
+                                return true;
+                            } else {
+                                return false;
+                            }
+                        },
                         request_vote_keepalive.get_drain_signal());
 
                     /* We're not holding the lock, but it's still safe to access these
@@ -1603,7 +1631,7 @@ bool raft_member_t<state_t>::candidate_run_election(
                     request_wrapper.request = request;
 
                     raft_rpc_reply_t reply_wrapper;
-                    bool ok = network->send_rpc(peer, request_wrapper,
+                    bool ok = network->send_rpc(peer, session, request_wrapper,
                         request_vote_keepalive.get_drain_signal(), &reply_wrapper);
 
                     if (!ok) {
@@ -1771,12 +1799,20 @@ void raft_member_t<state_t>::leader_send_updates(
         the heartbeat interval. */
         raft_log_index_t member_commit_index = 0;
 
+        /* This records the session ID of the session over which we most recently sent
+        a successful RPC. It's initially default-constructed since we've never sent a
+        successful RPC. If we ever see that the current session is not equal to
+        `last_rpc_session_id`, we'll make sure to send some RPC even if there is no data
+        that needs to be transmitted, just so the follower knows we're still leader. */
+        raft_network_session_id_t last_rpc_session_id;
+
         /* Raft paper, Figure 2: "Upon election: send initial empty AppendEntries RPCs
         (heartbeat) to each server"
-        Setting `send_even_if_empty` will ensure that we send an RPC immediately. */
-        bool send_even_if_empty = true;
+        This will be accomplished because `last_rpc_session_id` is default-constructed
+        and therefore not be equal to whatever the follower's session ID is, so we'll
+        definitely send an RPC.
 
-        /* This implementation deviates slightly from the Raft paper in that the initial
+        This implementation deviates slightly from the Raft paper in that the initial
         message may not be an empty append-entries RPC. Because `leader_send_updates()`
         runs in its own coroutine, it's possible that entries may be appended to the log
         (or even committed, although this is unlikely) between when we are elected as
@@ -1784,18 +1820,26 @@ void raft_member_t<state_t>::leader_send_updates(
         append-entries RPC that isn't empty, or even an install-snapshot RPC. This is OK
         because if our implementation is a candidate and receives an install-snapshot RPC
         for the current term, it will revert to follower just as if it had received an
-        append-entries RPC.
+        append-entries RPC. */
 
-        This is in a loop because after we send the initial RPC, we'll block until it's
-        time to send another update, and then go around the loop again. */
+        /* This is in a loop because after we send the initial RPC, we'll block until
+        it's time to send another update, and then go around the loop again. */
         while (true) {
             /* Don't bother trying to send an RPC until the peer is present in
             `get_connected_members()`. */
             DEBUG_ONLY_CODE(check_invariants(mutex_acq.get()));
             mutex_acq.reset();
+            raft_network_session_id_t session_id;
             network->get_connected_members()->run_key_until_satisfied(peer,
-                [](const empty_value_t *x) { return x != nullptr; },
-                update_keepalive.get_drain_signal());
+                [](const raft_network_session_id_t *x) {
+                    if (x != nullptr) {
+                        session_id = *x;
+                        return true;
+                    } else {
+                        return false;
+                    }
+                },
+                update_vote_keepalive.get_drain_signal());
             mutex_acq.init(
                 new new_mutex_acq_t(&mutex, update_keepalive.get_drain_signal()));
             DEBUG_ONLY_CODE(check_invariants(mutex_acq.get()));
@@ -1821,7 +1865,7 @@ void raft_member_t<state_t>::leader_send_updates(
                 raft_rpc_reply_t reply_wrapper;
                 DEBUG_ONLY_CODE(check_invariants(mutex_acq.get()));
                 mutex_acq.reset();
-                bool ok = network->send_rpc(peer, request_wrapper,
+                bool ok = network->send_rpc(peer, session, request_wrapper,
                     update_keepalive.get_drain_signal(), &reply_wrapper);
                 mutex_acq.init(
                     new new_mutex_acq_t(&mutex, update_keepalive.get_drain_signal()));
@@ -1853,11 +1897,11 @@ void raft_member_t<state_t>::leader_send_updates(
                     request.last_included_index,
                     mutex_acq.get(),
                     update_keepalive.get_drain_signal());
-                send_even_if_empty = false;
+                last_rpc_session_id = session_id;
 
             } else if (next_index <= ps.log.get_latest_index() ||
                     member_commit_index < committed_state.get_ref().log_index ||
-                    send_even_if_empty) {
+                    session_id != last_rpc_session_id) {
                 /* The peer's log ends right where our log begins, or in the middle of
                 our log. Send an append-entries RPC. */
 
@@ -1875,7 +1919,7 @@ void raft_member_t<state_t>::leader_send_updates(
                 raft_rpc_reply_t reply_wrapper;
                 DEBUG_ONLY_CODE(check_invariants(mutex_acq.get()));
                 mutex_acq.reset();
-                bool ok = network->send_rpc(peer, request_wrapper,
+                bool ok = network->send_rpc(peer, session, request_wrapper,
                     update_keepalive.get_drain_signal(), &reply_wrapper);
                 mutex_acq.init(
                     new new_mutex_acq_t(&mutex, update_keepalive.get_drain_signal()));
@@ -1920,28 +1964,54 @@ void raft_member_t<state_t>::leader_send_updates(
                     nextIndex and retries the AppendEntries RPC. */
                     --next_index;
                 }
-                send_even_if_empty = false;
+                last_rpc_session_id = session_id;
 
-            } else if (!send_even_if_empty) {
+            } else {
                 guarantee(next_index == ps.log.get_latest_index() + 1);
                 guarantee(member_commit_index == committed_state.get_ref().log_index);
-                /* OK, the peer is completely up-to-date. Wait until either an entry is
-                appended to the log, or our commit index advances, and then go around the
-                loop again. This implementation deviates from the Raft paper in that we
-                don't send regular heartbeats if there are no new entries in the log;
-                instead, we rely on the RPC connection timeouts to detect failed leaders.
-                */
+                guarantee(last_rpc_session_id == session_id);
+                /* OK, the peer is completely up-to-date. Wait until it's time to send
+                another message, and then go around the loop again. */
                 DEBUG_ONLY_CODE(check_invariants(mutex_acq.get()));
                 mutex_acq.reset();
 
-                run_until_satisfied_2(
-                    committed_state.get_watchable(),
-                    latest_state.get_watchable(),
-                    [&](const state_and_config_t &cs, const state_and_config_t &ls) {
-                        return cs.log_index > member_commit_index ||
-                            ls.log_index > next_index;
+                cond_t continue_cond;
+
+                /* If the commit index advances, we'll go around the loop again to
+                immediately send the updated commit index to the followers. */
+                watchable_t<state_and_config_t>::subscription_t commit_subs(
+                    [&](const state_and_config_t &cs) {
+                        if (cs.log_index > member_commit_index) {
+                            continue_cond.pulse_if_not_already_pulsed();
+                        }
                     },
-                    update_keepalive.get_drain_signal());
+                    committed_state.get_watchable(),
+                    true);
+
+                /* If new entries are added to the queue, we'll go around the loop again
+                to send the new entries to the followers. */
+                watchable_t<state_and_config_t>::subscription_t latest_subs(
+                    [&](const state_and_config_t &ls) {
+                        if (ls.log_index > next_index) {
+                            continue_cond.pulse_if_not_already_pulsed();
+                        }
+                    },
+                    committed_state.get_watchable(),
+                    true);
+
+                /* If the connection enters a new session, we'll go around the loop again
+                to inform the follower that we're still leader */
+                watchable_map_t<raft_member_id_t, raft_network_session_id_t>::key_subs_t
+                    session_subs(
+                        network_interface->get_connected_members(),
+                        peer,
+                        [&](const raft_network_session_id_t *x) {
+                            if (x != nullptr && *x != session_id) {
+                                continue_cond.pulse_if_not_already_pulsed();
+                            }
+                        });
+
+                wait_interruptible(&continue_cond, update_keepalive.get_drain_signal());
 
                 mutex_acq.init(
                     new new_mutex_acq_t(&mutex, update_keepalive.get_drain_signal()));
