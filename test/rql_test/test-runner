@@ -4,7 +4,7 @@
 
 from __future__ import print_function
 
-import atexit, collections, copy, distutils.version, distutils.spawn, json, optparse, os
+import atexit, collections, copy, datetime, distutils.version, distutils.spawn, json, optparse, os
 import re, resource, shutil, signal, stat, string, subprocess, sys, tempfile, threading, time, traceback, warnings
 
 try:
@@ -39,7 +39,7 @@ testExtensions = ['test', 'yaml']
 
 r = utils.import_python_driver()
 
-print_debug = True
+print_debug = False
 
 # -- internal global variables
 
@@ -865,10 +865,9 @@ class Test(object):
     testProcess = None
     
     setupStartTime = None
-    setupDuration = None
+    setupDuration = 0
     testStartTime = None
-    testDuration = None
-    __duration = None
+    testDuration = 0
     
     envVariables = None
     
@@ -926,10 +925,6 @@ class Test(object):
         self.__result = value
     
     @property
-    def duration(self):
-        return (self.setupDuration or 0) + (self._duration or 0)
-    
-    @property
     def console_output(self):
         errorReturn = '' + (self.errorMessage or '') + (self.errorDetails or '')
         
@@ -944,8 +939,9 @@ class Test(object):
         
         self.__status = 'queued'
         self.setupStartTime = None
-        self.setupDuration = None
-        self.duration = None
+        self.setupDuration = 0
+        self.testStartTime = None
+        self.testDuration = 0
     
     def setupTest(self):
         '''Do any pre-run setup that needs to be done for this test'''
@@ -959,10 +955,9 @@ class Test(object):
         try:
             self.subclassSetup()
         finally:
-            
-        # note: in subclasses where this could fail this should set the status to 'ended' and set the setupDuration correctly
+            self.setupDuration = time.time() - self.setupStartTime
     
-    self.subclassSetup():
+    def subclassSetup(self):
         pass
     
     def startTest(self, server=None):
@@ -975,7 +970,7 @@ class Test(object):
             raise RuntimeError('startTest requires a server instance, got: %s' % str(server))
         
         self.__status = 'running'
-        self.setupDuration = time.time() - self.setupStartTime
+        self.testStartTime = time.time()
         
         # -- collect ENV variables
         
@@ -1024,7 +1019,7 @@ class Test(object):
         
         # -- set the end markers
         
-        self.__duration = time.time() - self.setupStartTime - self.setupDuration
+        self.testDuration = time.time() - self.testStartTime
         self.__status = 'ended'
         
         # -- return True to signal it has ended
@@ -1051,7 +1046,7 @@ class Test(object):
             self.setupDuration = time.time() - self.setupStartTime
             self.result = result or 'failed setup'
         elif self.__status == 'running':
-            self.duration = time.time() - self.setupStartTime - self.setupDuration
+            self.testDuration = time.time() - self.testStartTime
             self.result = result or 'failed'
         
         if result == 'timed out':
@@ -1077,8 +1072,6 @@ class YamlTest(Test):
     
     def subclassSetup(self):
         '''Build test executable'''
-        
-        super(YamlTest, self).setupTest()
         
         # -- ensure build folder exists
         
@@ -1464,14 +1457,17 @@ class WorkerThread(threading.Thread):
                 
                 # -- write test metadata file
                 
-                with open(os.path.join(testOutputDir, 'metadata.json')) as metadataFile:
+                with open(os.path.join(testOutputDir, 'metadata.json'), 'w+') as metadataFile:
                     metaData = {
                         'name': test.name,
                         'result': test.result,
                         'returncode': test.returncode,
-                        'duration': test.duration
+                        'duration': test.testDuration,
+                        'testStartTime': datetime.date.fromtimestamp(test.testStartTime).isoformat(),
+                        'setupDuration': test.setupDuration,
+                        'setupStartTime': datetime.date.fromtimestamp(test.setupStartTime).isoformat()
                     }
-                    json.dump(metadataFile, indent=1)
+                    json.dump(metaData, metadataFile, indent=1)
                 
                 # -- return result
                 
@@ -1524,6 +1520,7 @@ def main():
     parser.add_option('-d', '--driver-port', dest='driver_port', default=None, type='int', help='driver port of an already-running rethinkdb instance')
     parser.add_option('-t', '--table', dest='table', default=None, type='string', help='name of pre-existing table to run queries against')
     
+    parser.add_option(      '--debug', dest='debug', default=False, action='store_true', help='show %s debug output' % os.path.basename(__file__))
     parser.add_option('-v', '--verbose', dest='verbose', default=False, action='store_true', help='show test output while running (disables -j/--jobs')
     
     parser.add_option('-j', '--jobs', dest='workerThreads', default=None, type='int', help='tests to run simultaneously (default 2)')
@@ -1531,6 +1528,10 @@ def main():
     options, args = parser.parse_args()
     
     # - options validation
+    
+    # debug
+    
+    print_debug = options.debug
     
     # cluster_port/driver_port
     
@@ -1772,7 +1773,11 @@ def main():
             elif message == 'ended':
                 runningTests -= 1
                 
-                durationString = '%.1f sec' % (test.duration)
+                durationString = None
+                if test.testDuration:
+                    durationString = '%.1f sec + %.1f sec setup' % (test.testDuration, test.setupDuration)
+                else:
+                    durationString = '%.1f sec setup' % test.setupDuration
                                 
                 if test.result is None:
                     raise Warning('Got None for test.result, this should not happen')
