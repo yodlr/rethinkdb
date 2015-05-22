@@ -7,6 +7,7 @@ import utils
 
 # -- start server if necessary
 
+server = None
 host = None
 port = None
 
@@ -30,10 +31,13 @@ r = utils.import_python_driver()
 conn = r.connect(host=host, port=port)
 r.expr(['test']).set_difference(r.db_list()).for_each(r.db_create(r.row)).run(conn)
 
-# -- Run with mocha
+# -- set mocha options
 
 mochaReporterOptions = ['-R', 'spec']
 if not utils.supportsTerminalColors():
-    mochaReporterOptions += ['--no-colors'] # handle visionmedia/mocha#1304
+    mochaReporterOptions += ['--no-colors'] # handle https://github.com/mochajs/mocha/issues/1304
 
-sys.exit(subprocess.call(['_mocha'] + mochaReporterOptions + [os.path.join(os.path.dirname(__file__), 'connection.js')]))
+# -- run test
+
+command = ['mocha', os.path.join(os.path.dirname(__file__), 'connection.js')]
+sys.exit(subprocess.call(command, stderr=subprocess.STDOUT))
