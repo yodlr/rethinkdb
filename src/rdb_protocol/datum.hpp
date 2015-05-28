@@ -316,7 +316,7 @@ public:
 
     void runtime_fail(base_exc_t::type_t exc_type,
                       const char *test, const char *file, int line,
-                      std::string msg) const NORETURN;
+                      lazy_msg_t msg) const NORETURN;
 
     static size_t max_trunc_size(skey_version_t skey_version);
     static size_t trunc_size(skey_version_t skey_version, size_t primary_key_size);

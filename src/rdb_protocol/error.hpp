@@ -6,8 +6,10 @@
 #include <string>
 
 #include "errors.hpp"
+#include <boost/variant.hpp>
 
 #include "containers/archive/archive.hpp"
+#include "containers/archive/stl_types.hpp"
 #include "rdb_protocol/counted_term.hpp"
 #include "rdb_protocol/ql2.pb.h"
 #include "rdb_protocol/ql2_extensions.pb.h"
@@ -51,14 +53,47 @@ protected:
 ARCHIVE_PRIM_MAKE_RANGED_SERIALIZABLE(
     base_exc_t::type_t, int8_t, base_exc_t::GENERIC, base_exc_t::NON_EXISTENCE);
 
+struct lazy_msg_t {
+    lazy_msg_t(std::string s) : var(std::move(s)) { }
+    lazy_msg_t(const char *s) : var(std::string(s)) { }
+    lazy_msg_t(std::function<std::string()> f) : var(std::move(f)) { }
+    const char *c_str() const {
+        if (auto *_f = boost::get<std::function<std::string()> >(&var)) {
+            std::function<std::string()> f = std::move(*_f);
+            // We tell a white lie when we says this function is const because
+            // we cache the result of the function.
+            *const_cast<std::remove_const<decltype(var)>::type *>(&var) = f();
+        }
+        auto *s = boost::get<std::string>(&var);
+        rassert(s);
+        return s->c_str();
+    }
+    boost::variant<std::string, std::function<std::string()> > var;
+};
+
+template<cluster_version_t W>
+void serialize(write_message_t *w, const lazy_msg_t &msg) {
+    std::string str(msg.c_str());
+    serialize<cluster_version_t::CLUSTER>(w, str);
+}
+template<cluster_version_t W>
+archive_result_t deserialize(read_stream_t *r, lazy_msg_t *msg) {
+    std::string str;
+    auto ret = deserialize<cluster_version_t::CLUSTER>(r, &str);
+    if (ret != archive_result_t::SUCCESS) return ret;
+    *msg = lazy_msg_t(std::move(str));
+    return archive_result_t::SUCCESS;
+}
+
+
 // NOTE: you usually want to inherit from `rcheckable_t` instead of calling this
 // directly.
 void runtime_fail(base_exc_t::type_t type,
                   const char *test, const char *file, int line,
-                  std::string msg, backtrace_id_t bt) NORETURN;
+                  lazy_msg_t msg, backtrace_id_t bt) NORETURN;
 void runtime_fail(base_exc_t::type_t type,
                   const char *test, const char *file, int line,
-                  std::string msg) NORETURN;
+                  lazy_msg_t msg) NORETURN;
 void runtime_sanity_check_failed(
     const char *file, int line, const char *test, const std::string &msg) NORETURN;
 
@@ -70,7 +105,7 @@ public:
     virtual ~rcheckable_t() { }
     virtual void runtime_fail(base_exc_t::type_t type,
                               const char *test, const char *file, int line,
-                              std::string msg) const = 0;
+                              lazy_msg_t msg) const = 0;
 };
 
 // This is a particular type of rcheckable.  A `bt_rcheckable_t` corresponds to
@@ -80,9 +115,9 @@ public:
 // is violated.)
 class bt_rcheckable_t : public rcheckable_t {
 public:
-    virtual void runtime_fail(base_exc_t::type_t type,
-                              const char *test, const char *file, int line,
-                              std::string msg) const {
+    void runtime_fail(base_exc_t::type_t type,
+                      const char *test, const char *file, int line,
+                      lazy_msg_t msg) const final {
         ql::runtime_fail(type, test, file, line, msg, bt);
     }
 
@@ -199,23 +234,28 @@ base_exc_t::type_t exc_type(const scoped_ptr_t<val_t> &v);
 class exc_t : public base_exc_t {
 public:
     // We have a default constructor because these are serialized.
-    exc_t() : base_exc_t(base_exc_t::GENERIC), message("UNINITIALIZED") { }
-    exc_t(base_exc_t::type_t type, const std::string &_message,
+    exc_t() : base_exc_t(base_exc_t::GENERIC), msg("UNINITIALIZED") { }
+    exc_t(base_exc_t::type_t type, lazy_msg_t _msg,
           backtrace_id_t _bt, size_t _dummy_frames = 0)
-        : base_exc_t(type), message(_message), bt(_bt), dummy_frames_(_dummy_frames) { }
+        : base_exc_t(type),
+          msg(std::move(_msg)),
+          bt(_bt),
+          dummy_frames_(_dummy_frames) { }
     exc_t(const base_exc_t &e, backtrace_id_t _bt, size_t _dummy_frames = 0)
-        : base_exc_t(e.get_type()), message(e.what()),
-          bt(_bt), dummy_frames_(_dummy_frames) { }
+        : base_exc_t(e.get_type()),
+          msg(e.what()),
+          bt(_bt),
+          dummy_frames_(_dummy_frames) { }
     virtual ~exc_t() throw () { }
 
-    const char *what() const throw () { return message.c_str(); }
+    const char *what() const throw () { return msg.c_str(); }
 
     backtrace_id_t backtrace() const { return bt; }
     size_t dummy_frames() const { return dummy_frames_; }
 
     RDB_DECLARE_ME_SERIALIZABLE(exc_t);
 private:
-    std::string message;
+    lazy_msg_t msg;
     backtrace_id_t bt;
     size_t dummy_frames_;
 };
@@ -226,16 +266,16 @@ private:
 // turned into a normal `exc_t`.
 class datum_exc_t : public base_exc_t {
 public:
-    datum_exc_t() : base_exc_t(base_exc_t::GENERIC), message("UNINITIALIZED") { }
-    explicit datum_exc_t(base_exc_t::type_t type, const std::string &_message)
-        : base_exc_t(type), message(_message) { }
+    datum_exc_t() : base_exc_t(base_exc_t::GENERIC), msg("UNINITIALIZED") { }
+    explicit datum_exc_t(base_exc_t::type_t type, lazy_msg_t _msg)
+        : base_exc_t(type), msg(std::move(_msg)) { }
     virtual ~datum_exc_t() throw () { }
 
-    const char *what() const throw () { return message.c_str(); }
+    const char *what() const throw () { return msg.c_str(); }
 
     RDB_DECLARE_ME_SERIALIZABLE(datum_exc_t);
 private:
-    std::string message;
+    lazy_msg_t msg;
 };
 
 } // namespace ql

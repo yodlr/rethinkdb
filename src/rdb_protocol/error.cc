@@ -18,7 +18,7 @@ namespace ql {
 void runtime_fail(base_exc_t::type_t type,
                   RQL_ERROR_VAR const char *test, RQL_ERROR_VAR const char *file,
                   RQL_ERROR_VAR int line,
-                  std::string msg, backtrace_id_t bt) {
+                  lazy_msg_t msg, backtrace_id_t bt) {
 #ifdef RQL_ERROR_BT
     msg = strprintf("%s\nFailed assertion: %s\nAt: %s:%d",
                     msg.c_str(), test, file, line);
@@ -27,7 +27,7 @@ void runtime_fail(base_exc_t::type_t type,
 }
 void runtime_fail(base_exc_t::type_t type,
                   RQL_ERROR_VAR const char *test, RQL_ERROR_VAR const char *file,
-                  RQL_ERROR_VAR int line, std::string msg) {
+                  RQL_ERROR_VAR int line, lazy_msg_t msg) {
 #ifdef RQL_ERROR_BT
     msg = strprintf("%s\nFailed assertion: %s\nAt: %s:%d",
                     msg.c_str(), test, file, line);
@@ -73,7 +73,7 @@ base_exc_t::type_t exc_type(const scoped_ptr_t<val_t> &v) {
 }
 
 RDB_IMPL_SERIALIZABLE_1_SINCE_v1_13(backtrace_id_t, id);
-RDB_IMPL_SERIALIZABLE_4_SINCE_v1_13(exc_t, type_, message, bt, dummy_frames_);
-RDB_IMPL_SERIALIZABLE_2_SINCE_v1_13(datum_exc_t, type_, message);
+RDB_IMPL_SERIALIZABLE_4_SINCE_v1_13(exc_t, type_, msg, bt, dummy_frames_);
+RDB_IMPL_SERIALIZABLE_2_SINCE_v1_13(datum_exc_t, type_, msg);
 
 } // namespace ql
