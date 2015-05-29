@@ -79,8 +79,32 @@ void debugf(const char *msg, ...) {
 
 #endif  // NDEBUG
 
-void debug_print(printf_buffer_t *buf, int x) {
-    buf->appendf("%d", x);
+void debug_print(printf_buffer_t *buf, int8_t x) {
+    buf->appendf("%" PRIi8, x);
+}
+
+void debug_print(printf_buffer_t *buf, int16_t x) {
+    buf->appendf("%" PRIi16, x);
+}
+
+void debug_print(printf_buffer_t *buf, int32_t x) {
+    buf->appendf("%" PRIi32, x);
+}
+
+void debug_print(printf_buffer_t *buf, int64_t x) {
+    buf->appendf("%" PRIi64, x);
+}
+
+void debug_print(printf_buffer_t *buf, uint8_t x) {
+    buf->appendf("%" PRIu8, x);
+}
+
+void debug_print(printf_buffer_t *buf, uint16_t x) {
+    buf->appendf("%" PRIu16, x);
+}
+
+void debug_print(printf_buffer_t *buf, uint32_t x) {
+    buf->appendf("%" PRIu32, x);
 }
 
 void debug_print(printf_buffer_t *buf, uint64_t x) {
@@ -102,6 +126,14 @@ debugf_in_dtor_t::debugf_in_dtor_t(const char *msg, ...) {
 debugf_in_dtor_t::~debugf_in_dtor_t() {
     debugf("%s", message.c_str());
 }
+void debug_print(printf_buffer_t *buf, int8_t x);
+void debug_print(printf_buffer_t *buf, int16_t x);
+void debug_print(printf_buffer_t *buf, int32_t x);
+void debug_print(printf_buffer_t *buf, int64_t x);
+void debug_print(printf_buffer_t *buf, uint8_t x);
+void debug_print(printf_buffer_t *buf, uint16_t x);
+void debug_print(printf_buffer_t *buf, uint32_t x);
+void debug_print(printf_buffer_t *buf, uint64_t x);
 
 void pb_print(DEBUG_VAR Term *t) {
     debugf("%s\n", t->DebugString().c_str());
