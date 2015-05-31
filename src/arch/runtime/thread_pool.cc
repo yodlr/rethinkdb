@@ -117,7 +117,8 @@ void *linux_thread_pool_t::start_thread(void *arg) {
         backtrace for us. */
 #ifndef VALGRIND
         stack_t segv_stack;
-        segv_stack.ss_sp = malloc_aligned(SEGV_STACK_SIZE, getpagesize());
+        page_aligned_ptr_t<void> segv_stack_buffer(SEGV_STACK_SIZE);
+        segv_stack.ss_sp = segv_stack_buffer.get();
         segv_stack.ss_flags = 0;
         segv_stack.ss_size = SEGV_STACK_SIZE;
         int res = sigaltstack(&segv_stack, NULL);
@@ -158,10 +159,6 @@ void *linux_thread_pool_t::start_thread(void *arg) {
         // broken out of its loop, it might delete something that the other thread
         // needed to access.
         tdata->barrier->wait();
-
-#ifndef VALGRIND
-        free(segv_stack.ss_sp);
-#endif
 
         // If this thread created the generic blocker pool, clean it up
         if (generic_blocker_pool != NULL) {

@@ -60,13 +60,13 @@ public:
     bool address_is_stack_overflow(void *addr);
 
     /* Returns the base of the stack */
-    void *get_stack_base() { return static_cast<char*>(stack) + stack_size; }
+    void *get_stack_base() { return static_cast<char*>(stack.get()) + stack_size; }
 
     /* Returns the end of the stack */
-    void *get_stack_bound() { return stack; }
+    void *get_stack_bound() { return stack.get(); }
 
 private:
-    void *stack;
+    page_aligned_ptr_t<void> stack;
     size_t stack_size;
 #ifdef VALGRIND
     int valgrind_stack_id;
