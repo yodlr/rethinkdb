@@ -17,8 +17,8 @@ The test framework is written in python.
 
 ### Dependencies
 
-RethinkDB needs to have `./configure` run, and been built before these tests will work. 
-Additionally, Python's YAML library and the node.js mocha test framework need to be installed.
+Before the tests will work, you must `./configure` and build RethinkDB. Additionally, Python's YAML library
+and the node.js mocha test framework need to be installed.
 
 ```
 make -C ../..
@@ -104,14 +104,14 @@ Multiple languages/language versions can be chosen simultaneously with multiple 
 
 ### Connection tests
 
-* `./test-runner connections/connection` run both the javascript and python versions of the tests
+* `./test-runner connections/connection` runs all three versions of the tests
 * `./test-runner -i js connections/connection`
 * `./test-runner -i py connections/connection`
 * `./test-runner -i rb connections/connection`
 
 ### Cursor tests
 
-* `./test-runner run connections/cursor` run both the javascript and python versions of the tests
+* `./test-runner run connections/cursor` runs all three versions of the tests
 * `./test-runner -i js connections/cursor`
 * `./test-runner -i py connections/cursor`
 * `./test-runner -i rb connections/cursor`
