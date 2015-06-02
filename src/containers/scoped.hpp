@@ -254,10 +254,6 @@ public:
         movee.ptr_ = NULL;
     }
 
-    ~scoped_alloc_t() {
-        dealloc(ptr_);
-    }
-
     void operator=(scoped_alloc_t &&movee) noexcept {
         scoped_alloc_t tmp(std::move(movee));
         swap(tmp);
@@ -289,12 +285,14 @@ public:
 
     // Does not return a raw pointer to ensure that the pointer gets deallocated correctly
     released_t release() {
+        rassert(ptr_ != nullptr);
         released_t released(ptr_);
         ptr_ = NULL;
         return released;
     }
 
     scoped_alloc_t(released_t released) {
+        rassert(released.ptr_ != nullptr);
         ptr_ = released.ptr_;
         released.ptr_ = nullptr;
     }
@@ -306,6 +304,11 @@ public:
     void reset() {
         scoped_alloc_t tmp;
         swap(tmp);
+    }
+
+protected:
+    ~scoped_alloc_t() {
+        dealloc(ptr_);
     }
 
 private:
