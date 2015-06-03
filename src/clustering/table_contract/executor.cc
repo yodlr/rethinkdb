@@ -148,6 +148,7 @@ void contract_executor_t::update(const table_raft_state_t &new_state,
                 }
             }
             if (ok_to_create) {
+                fprintf(stderr, "Ok to create\n");
                 executions[key] = make_scoped<execution_data_t>();
                 execution_data_t *data = executions[key].get();
                 data->contract_id = new_pair.first;
@@ -187,6 +188,8 @@ void contract_executor_t::update(const table_raft_state_t &new_state,
                     break;
                 default: unreachable();
                 }
+            } else {
+                fprintf(stderr, "Not ok to create\n");
             }
         }
     }
@@ -194,6 +197,7 @@ void contract_executor_t::update(const table_raft_state_t &new_state,
     any of the new contracts */
     for (const auto &old_pair : executions) {
         if (dont_delete.count(old_pair.first) == 0) {
+            fprintf(stderr, "Deleting an executor\n");
             to_delete_out->insert(old_pair.first);
         }
     }

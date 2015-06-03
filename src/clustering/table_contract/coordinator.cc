@@ -70,7 +70,7 @@ bool invisible_to_majority_of_set(
             ++count;
         }
     }
-    return !(count > judges.size() / 2); 
+    return !(count > judges.size() / 2);
 }
 
 /* `calculate_contract()` calculates a new contract for a region. Whenever any of the
@@ -495,9 +495,26 @@ void calculate_all_contracts(
 
     /* Put the new contracts into a `region_map_t` to coalesce adjacent regions that have
     identical contracts */
-    region_map_t<contract_t> new_contract_region_map =
-        region_map_t<contract_t>::from_unordered_fragments(
-            std::move(new_contract_region_vector), std::move(new_contract_vector));
+    std::vector<special_contract_t> new_special_contract_vector;
+    for (size_t i = 0; i < new_contract_vector.size(); ++i) {
+        const auto &c = new_contract_vector[i];
+        special_contract_t sc;
+        sc.replicas = c.replicas;
+        sc.voters = c.voters;
+        sc.temp_voters = c.temp_voters;
+        sc.primary = c.primary;
+        sc.branch = c.branch;
+        sc.hash_beg = new_contract_region_vector[i].beg;
+        sc.hash_end = new_contract_region_vector[i].end;
+        new_special_contract_vector.push_back(sc);
+    }
+    region_map_t<special_contract_t> new_special_contract_region_map =
+        region_map_t<special_contract_t>::from_unordered_fragments(
+            std::move(new_contract_region_vector), std::move(new_special_contract_vector));
+    region_map_t<contract_t> new_contract_region_map;
+    new_special_contract_region_map.visit(region_t::universe(), [&](const region_t &r, const special_contract_t &c) {
+        new_contract_region_map.update(r, c);
+    });
 
     /* Slice the new contracts by CPU shard, so that no contract spans more than one CPU
     shard */
@@ -684,7 +701,7 @@ contract_coordinator_t::contract_coordinator_t(
     contract_pumper.notify();
     config_pumper.notify();
 }
-        
+
 
 boost::optional<raft_log_index_t> contract_coordinator_t::change_config(
         const std::function<void(table_config_and_shards_t *)> &changer,

@@ -80,6 +80,19 @@ RDB_DECLARE_EQUALITY_COMPARABLE(contract_t);
 RDB_DECLARE_SERIALIZABLE(contract_t::primary_t);
 RDB_DECLARE_SERIALIZABLE(contract_t);
 
+class special_contract_t : public contract_t {
+public:
+    uint64_t hash_beg, hash_end;
+    bool operator==(const special_contract_t &o) const {
+        return o.replicas == replicas
+                && o.voters == voters
+                && o.temp_voters == temp_voters
+                && o.primary == primary
+                && (o.branch == branch || (o.hash_beg == hash_beg && o.hash_end == hash_end));
+    }
+};
+//RDB_DECLARE_EQUALITY_COMPARABLE(special_contract_t);
+
 /* The `contract_executor_t` looks at what each `contract_t` says about its server ID,
 and reacts according to the following rules:
 

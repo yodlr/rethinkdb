@@ -344,6 +344,7 @@ private:
         ++after_it;
         rassert(after_it != zones.end());
         if (before_it->second == after_it->second) {
+            fprintf(stderr, "Coalescing\n");
             zones.erase(before_it);
         }
     }
@@ -360,6 +361,7 @@ private:
                 break;
             }
             if (jt->second == it->second) {
+                fprintf(stderr, "Coalescing range\n");
                 zones.erase(jt);
             }
         }
