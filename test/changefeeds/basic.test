@@ -149,30 +149,6 @@ class Changefeeds_Basic(rdb_unittest.RdbTestCase):
         self.table.get(updateItemId).update({'update':2}).run(conn)
         changefeed.next(wait=.2)
     
-    def test_table_drop(self):
-        '''Test that a changefeed is closed when the table it references is dropped'''
-        
-        # start the feeds
-        
-        feeds = [
-            { 'name':'table',   'feed':self.table.changes().run(self.conn) },
-            { 'name':'point',   'feed':self.table.get(self.table.nth(1)['id']).changes().run(self.conn) }, 
-            { 'name':'between', 'feed':self.table.between(self.r.minval, self.r.maxval).changes().run(self.conn) } 
-        ]
-        
-        # drop the table
-        
-        self.r.db(self.dbName).table_drop(self.tableName).run(self.conn)
-        
-        # check that each errors
-        
-        for feed in feeds:
-            try:
-                self.assertRaises(self.r.RqlRuntimeError, feed['feed'].next, wait=.2)
-            except AssertionError as e:
-                e.args += ('%s feed' % feed['name'], )
-                raise e
-    
     def test_connection_death(self):
         '''Test that the client handles the death of the server at the other end of the connection correctly'''
         self.destructiveTest = True
@@ -200,6 +176,37 @@ class Changefeeds_Basic(rdb_unittest.RdbTestCase):
         
         self.table.insert({}).run(stable_conn)
         self.assertRaises(self.r.RqlDriverError, next, changefeed)
+
+# - generate the table drop tests
+
+for feed in [
+    { 'name':'table',   'feed':lambda self: self.table.changes().run(self.conn) },
+    { 'name':'point',   'feed':lambda self: self.table.get(self.table.nth(1)['id']).changes().run(self.conn) },
+    { 'name':'between', 'feed':lambda self: self.table.between(self.r.minval, self.r.maxval).changes().run(self.conn) }
+]:
+    def test_table_drop_test_generator(feed):
+        def test(self):
+            '''Test that a %s changefeed is closed when the table it references is dropped''' % feed['name']
+            
+            # start the feed
+            
+            runningFeed = feed['feed'](self)
+            
+            # drop the table
+            
+            self.r.db(self.dbName).table_drop(self.tableName).run(self.conn)
+            
+            # check the feed errors
+            
+            try:
+                self.assertRaises(self.r.RqlRuntimeError, runningFeed.next, wait=.2)
+            except AssertionError as e:
+                # include the correct feed name
+                e.args += ('%s feed' % feed['name'], )
+                raise e
+        return test
+    testName = 'test_table_drop_%s_feed' % feed['name']
+    setattr(Changefeeds_Basic, testName, test_table_drop_test_generator(feed))
 
 # ==== main
 
