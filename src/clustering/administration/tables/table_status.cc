@@ -10,15 +10,14 @@
 #include "clustering/table_manager/table_meta_client.hpp"
 
 table_status_artificial_table_backend_t::table_status_artificial_table_backend_t(
-            boost::shared_ptr<semilattice_readwrite_view_t<
-                cluster_semilattice_metadata_t> > _semilattice_view,
-            table_meta_client_t *_table_meta_client,
-            admin_identifier_format_t _identifier_format,
-            server_config_client_t *_server_config_client) :
-        common_table_artificial_table_backend_t(
-            _semilattice_view, _table_meta_client, _identifier_format),
-        server_config_client(_server_config_client) {
-}
+        boost::shared_ptr<semilattice_readwrite_view_t<
+            cluster_semilattice_metadata_t> > _semilattice_view,
+        server_config_client_t *_server_config_client,
+        table_meta_client_t *_table_meta_client,
+        admin_identifier_format_t _identifier_format) :
+    common_table_artificial_table_backend_t(
+        _semilattice_view, _table_meta_client, _identifier_format),
+    server_config_client(_server_config_client) { }
 
 table_status_artificial_table_backend_t::~table_status_artificial_table_backend_t() {
     begin_changefeed_destruction();
@@ -109,12 +108,11 @@ ql::datum_t convert_table_status_to_datum(
 
 void table_status_artificial_table_backend_t::format_row(
         const namespace_id_t &table_id,
-        const table_basic_config_t &basic_config,
+        const table_config_and_shards_t &config,
         const ql::datum_t &db_name_or_uuid,
         signal_t *interruptor_on_home,
         ql::datum_t *row_out)
-        THROWS_ONLY(interrupted_exc_t, no_such_table_exc_t, failed_table_op_exc_t,
-            admin_op_exc_t) {
+        THROWS_ONLY(interrupted_exc_t, no_such_table_exc_t) {
     assert_thread();
 
     table_readiness_t readiness;
@@ -123,15 +121,15 @@ void table_status_artificial_table_backend_t::format_row(
     calculate_status(
         table_id,
         interruptor_on_home,
-        table_meta_client,
         server_config_client,
+        table_meta_client,
         &readiness,
         &shard_statuses,
         &server_names);
 
     *row_out = convert_table_status_to_datum(
         table_id,
-        basic_config.name,
+        config.config.basic.name,
         db_name_or_uuid,
         readiness,
         shard_statuses,
@@ -190,8 +188,8 @@ table_wait_result_t wait_for_table_readiness(
             calculate_status(
                 table_id,
                 interruptor_on_home,
-                backend->table_meta_client,
                 backend->server_config_client,
+                backend->table_meta_client,
                 &readiness,
                 &shard_statuses,
                 &server_names);

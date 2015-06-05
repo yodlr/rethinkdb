@@ -17,7 +17,7 @@ public:
         server_name_map_t _server_names);
     ~table_availability_issue_t();
 
-    bool is_critical() const { return readiness < table_readiness_t::writes; };
+    bool is_critical() const { return readiness < table_readiness_t::writes; }
     const datum_string_t &get_name() const { return table_availability_issue_type; }
 
 private:
@@ -173,9 +173,8 @@ void table_issue_tracker_t::check_table(const namespace_id_t &table_id,
     server_name_map_t server_names;
 
     try {
-        calculate_status(table_id, interruptor, table_meta_client,
-                         server_config_client, &readiness, &shard_statuses,
-                         &server_names);
+        calculate_status(table_id, interruptor, server_config_client, table_meta_client,
+                         &readiness, &shard_statuses, &server_names);
     } catch (const interrupted_exc_t &) {
         // Ignore interruption - can't be passed through pmap
     } catch (const no_such_table_exc_t &) {
