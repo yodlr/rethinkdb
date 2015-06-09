@@ -1,9 +1,21 @@
 // Copyright 2010-2013 RethinkDB, all rights reserved.
+#include "arch/runtime/coroutines.hpp"
 #include "rdb_protocol/datum.hpp"
 #include "rdb_protocol/error.hpp"
 #include "rdb_protocol/validate.hpp"
 #include "utils.hpp"
 
+// The minimum amount of stack space we require to be available on a coroutine
+// before further validating a protocol buffer.
+const size_t MIN_VALIDATE_STACK_SPACE = 4 * KILOBYTE;
+
+void ensure_enough_stack() {
+    rcheck_toplevel(
+        has_n_bytes_free_stack_space(MIN_VALIDATE_STACK_SPACE),
+        ql::base_exc_t::GENERIC,
+        "Insufficient stack space available to validate query.  This is usually "
+        "caused by running a very deeply-nested query.");
+}
 
 #define check_has(pb, has_field, field) do {                            \
         auto const &check_has_tmp = (pb);                               \
@@ -48,6 +60,7 @@
     } while (0)
 
 void validate_pb(const Query &q) {
+    ensure_enough_stack();
     check_type(Query, q);
     if (q.type() == Query::START) {
         check_has(q, has_query, "query");
@@ -62,12 +75,14 @@ void validate_pb(const Query &q) {
 }
 
 void validate_pb(const Query::AssocPair &ap) {
+    ensure_enough_stack();
     check_has(ap, has_key, "key");
     check_has(ap, has_val, "val");
     validate_pb(ap.val());
 }
 
 void validate_pb(const Frame &f) {
+    ensure_enough_stack();
     check_type(Frame, f);
     if (f.type() == Frame::POS) {
         check_has(f, has_pos, "pos");
@@ -77,12 +92,14 @@ void validate_pb(const Frame &f) {
 }
 
 void validate_pb(const Backtrace &bt) {
+    ensure_enough_stack();
     for (int i = 0; i < bt.frames_size(); ++i) {
         validate_pb(bt.frames(i));
     }
 }
 
 void validate_pb(const Response &r) {
+    ensure_enough_stack();
     check_type(Response, r);
     if (r.type() == Response::SUCCESS_ATOM
         || r.type() == Response::SUCCESS_SEQUENCE
@@ -98,6 +115,7 @@ void validate_pb(const Response &r) {
 }
 
 void validate_pb(const Datum &d) {
+    ensure_enough_stack();
     check_type(Datum, d);
     if (d.type() == Datum::R_BOOL) {
         check_has(d, has_r_bool, "r_bool");
@@ -131,12 +149,14 @@ void validate_pb(const Datum &d) {
 }
 
 void validate_pb(const Datum::AssocPair &ap) {
+    ensure_enough_stack();
     check_has(ap, has_key, "key");
     check_has(ap, has_val, "val");
     validate_pb(ap.val());
 }
 
 void validate_var_term(const Term &t) {
+    ensure_enough_stack();
     check_empty(t, optargs_size, "optargs");
     check_size(1, t, args_size, "args");
     const Term &arg0 = t.args(0);
@@ -158,6 +178,7 @@ void validate_var_term(const Term &t) {
 }
 
 void validate_pb(const Term &t) {
+    ensure_enough_stack();
     check_type(Term, t);
     if (t.type() == Term::DATUM) {
         check_has(t, has_datum, "datum");
@@ -177,6 +198,7 @@ void validate_pb(const Term &t) {
 }
 
 void validate_pb(const Term::AssocPair &ap) {
+    ensure_enough_stack();
     check_has(ap, has_key, "key");
     check_has(ap, has_val, "val");
     validate_pb(ap.val());
