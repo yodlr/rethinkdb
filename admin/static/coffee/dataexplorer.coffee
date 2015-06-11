@@ -3066,7 +3066,7 @@ module 'DataExplorerView', ->
             no_result: Handlebars.templates['dataexplorer_result_empty-template']
 
         render: =>
-            if @query_result.results.length == 0
+            if @query_result.results?.length == 0
                 @$el.html @templates.wrapper tree: @templates.no_result
                     ended: @query_result.ended
                     at_beginning: @query_result.at_beginning()
