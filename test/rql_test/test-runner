@@ -4,7 +4,7 @@
 
 from __future__ import print_function
 
-import atexit, collections, copy, datetime, distutils.version, distutils.spawn, json, optparse, os
+import atexit, collections, copy, datetime, distutils.version, distutils.spawn, itertools, json, optparse, os
 import re, resource, shutil, signal, stat, string, subprocess, sys, tempfile, threading, time, traceback, warnings
 
 try:
@@ -932,7 +932,13 @@ class Test(object):
     
     @property
     def console_output(self):
-        errorReturn = '' + (self.errorMessage or '') + (self.errorDetails or '')
+        errorReturn = self.errorMessage or ''
+        if self.errorDetails:
+            if '\n' in self.errorDetails:
+                errorReturn += '\n'
+            errorReturn += self.errorDetails
+            if '\n' in self.errorDetails:
+                errorReturn += '\n'
         
         if self.consoleFile is sys.stdout:
             return errorReturn
@@ -1009,7 +1015,7 @@ class Test(object):
         # -- start the test process
         
         with testLock:
-            self.testProcess = subprocess.Popen(self.command, stdout=self.consoleFile, stderr=subprocess.STDOUT, preexec_fn=os.setpgrp, env=self.envVariables)
+            self.testProcess = subprocess.Popen(self.command, stdout=self.consoleFile, stderr=subprocess.STDOUT, preexec_fn=os.setpgrp, env=envVariables)
     
     def checkTestDone(self):
         '''Check on a running test, reply with True if running, False if ended'''
@@ -1453,6 +1459,7 @@ class WorkerThread(threading.Thread):
                 # - monitor the test running
                 
                 restartServer = False
+                copyServerContents = False
                 
                 if test.status == 'running':
                     deadline = time.time() + test.timeout
@@ -1471,7 +1478,7 @@ class WorkerThread(threading.Thread):
                             except Exception as e:
                                 test.endTest(result='crashed server', errorMessage='Server crashed during testing')
                                 restartServer = True
-                                # ToDo: copy the server logs into the folder
+                                copyServerContents = True
                                 break
                             time.sleep(.1)
                         except Exception as e:
@@ -1492,17 +1499,28 @@ class WorkerThread(threading.Thread):
                         if test.result == 'succeeded':
                             test.result = 'crashed server'
                         
-                        if test.errorMessage is None:
-                            test.errorMessage = 'Server crashed while running'
-                        else:
-                            test.errorMessage += ', and the crashed server while running'
+                        restartServer = True
+                        copyServerContents = True
                         
-                        if test.errorDetails is None:
-                            test.errorDetails = traceback.format_exc()
+                        if test.errorMessage is None:
+                            test.errorMessage = 'Server found crashed after test'
+                        else:
+                            test.errorMessage += ', and the server crashed while running'
                 
-                # copy the server contents if it crashed else copy server log
-                if self.existingServer is None and test.result == 'crashed server':
+                # - copy the server contents or just the server log
+                if copyServerContents:
                     shutil.copytree(self.server.files.db_path, os.path.join(testOutputDir, 'server'))
+                    
+                    # try to add the server log to the errorDetails
+                    try:
+                        self.server.console_file.seek(0)
+                        if test.errorDetails is None:
+                            test.errorDetails = '\nServer ouput:\n%s' % self.server.console_file.read()
+                        else:
+                            test.errorDetails += '\n\nServer ouput:\n%s' % self.server.console_file.read()
+                    except IOError: pass # stdout will cause this
+                    except Exception as e:
+                        warnings.warn(str(e))
                 else:
                     shutil.copyfile(self.server.logfile_path, os.path.join(testOutputDir, 'server_log.txt'))
                 

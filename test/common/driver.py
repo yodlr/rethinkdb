@@ -445,7 +445,7 @@ class _Process(object):
             
             self.console_file.write("Launching:\n%s\n" % str(self.args))
             
-            self.process = subprocess.Popen(self.args, stdout=self.console_file, stderr=self.console_file, preexec_fn=os.setpgrp)
+            self.process = subprocess.Popen(self.args, stdout=self.console_file, stderr=subprocess.STDOUT, preexec_fn=os.setpgrp)
             
             runningServers.append(self)
             self.process_group_id = self.process.pid
