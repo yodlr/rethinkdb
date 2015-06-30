@@ -1537,10 +1537,10 @@ class WorkerThread(threading.Thread):
                         'name': test.name,
                         'result': test.result,
                         'returncode': test.returncode,
-                        'duration': test.testDuration,
-                        'testStartTime': datetime.date.fromtimestamp(test.testStartTime).isoformat(),
-                        'setupDuration': test.setupDuration,
-                        'setupStartTime': datetime.date.fromtimestamp(test.setupStartTime).isoformat()
+                        'test duration': test.testDuration,
+                        'test start time': datetime.date.fromtimestamp(test.testStartTime).isoformat(),
+                        'setup duration': test.setupDuration,
+                        'setup start time': datetime.date.fromtimestamp(test.setupStartTime).isoformat()
                     }
                     json.dump(metaData, metadataFile, indent=1)
                 
