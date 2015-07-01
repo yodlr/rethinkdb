@@ -874,6 +874,7 @@ class Test(object):
     testDuration = 0
     
     envVariablesToSet = None
+    envVariables = None # set at run time
     
     consoleFile = sys.stdout
     returncode = None
@@ -1011,6 +1012,9 @@ class Test(object):
                 envVariables[variableName] = value
             elif variableName in envVariables:
                 del envVariables[variableName]
+        
+        # - stow the env variables used
+        self.envVariables = envVariables
         
         # -- start the test process
         
@@ -1275,7 +1279,7 @@ class WorkerThread(threading.Thread):
         self.outputDir = outputDir
         
         if not os.path.isdir(scratchDir):
-            raise ValueError('outputDir must be an existing directory, got: %s' % scratchDir)
+            raise ValueError('scratchDir must be an existing directory, got: %s' % scratchDir)
         self.scratchDir = scratchDir
         
         if existingServer is not None:
@@ -1425,7 +1429,11 @@ class WorkerThread(threading.Thread):
                 
                 testOutputDir = os.path.join(self.outputDir, test.name)
                 if os.path.exists(testOutputDir):
-                    testOutputDir = tempfile.mkdtemp(prefix=test.name + '-', dir=self.outputDir)
+                    # delete the old item
+                    if os.path.isdir(testOutputDir):
+                        shutil.rmtree(testOutputDir)
+                    else:
+                        os.unlink(testOutputDir)
                 os.makedirs(testOutputDir)
                 
                 # -- set consoleFile
@@ -1533,14 +1541,21 @@ class WorkerThread(threading.Thread):
                 # -- write test metadata file
                 
                 with open(os.path.join(testOutputDir, 'metadata.json'), 'w+') as metadataFile:
+                    command = ''
+                    try:
+                        command = test.command
+                    except RuntimeError: pass
+                    
                     metaData = {
                         'name': test.name,
                         'result': test.result,
                         'returncode': test.returncode,
-                        'test duration': test.testDuration,
-                        'test start time': datetime.date.fromtimestamp(test.testStartTime).isoformat(),
-                        'setup duration': test.setupDuration,
-                        'setup start time': datetime.date.fromtimestamp(test.setupStartTime).isoformat()
+                        'test duration sec': test.testDuration,
+                        'test start time': datetime.datetime.fromtimestamp(test.testStartTime).isoformat(),
+                        'setup duration sec': test.setupDuration,
+                        'setup start time': datetime.datetime.fromtimestamp(test.setupStartTime).isoformat(),
+                        'command': command,
+                        'env variables': test.envVariables
                     }
                     json.dump(metaData, metadataFile, indent=1)
                 
@@ -1642,7 +1657,7 @@ def main():
     # outputDir
     
     if options.output_dir is None:
-        # default to a hidden directory that is cleaned up at exit
+        # default to a hidden directory that is deleted at exit
         outputDir = tempfile.mkdtemp(prefix='.rethinkdbTestTemp-', dir=os.getcwd())
         utils.cleanupPathAtExit(outputDir)
     else:
@@ -1654,9 +1669,7 @@ def main():
                 os.makedirs(options.output_dir)
             except Exception as e:
                 parser.error('Unable to create output directory: %s' % str(e))
-        
-        outputDir = tempfile.mkdtemp(prefix='test-run-', dir=options.output_dir)
-        # ToDo: improve the name of the folder
+        outputDir = options.output_dir
     
     # scratchDirPath
     
@@ -1711,8 +1724,14 @@ def main():
     
     if options.clean_output_dir is True:
         try:
-            shutil.rmtree(outputDir)
-            os.mkdir(outputDir) # re-establish the directory
+            for item in os.listdir(outputDir):
+                item = os.path.join(outputDir, item)
+                if os.path.samefile(item, scratchDirPath):
+                    continue
+                if os.path.isdir(item):
+                    shutil.rmtree(item)
+                else:
+                    os.unlink(item)
         except Exception as err:
             parser.error('Unable to clean output directory: %s' % str(err))
     
