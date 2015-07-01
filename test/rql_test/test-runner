@@ -1810,6 +1810,8 @@ def main():
     print('Using rethinkdb binary %s' % rethinkdb_exe_path)
     for thisLanguage in options.languages:
         print('\t%s interpreter: %s, driver: %s' % (thisLanguage.display_name, thisLanguage.interpreter_path, thisLanguage.driver_source_path))
+        if outputDir not in utils.pathsToClean:
+            print('\toutput folder: %s' % outputDir)
     
     startTime = time.time()
     
