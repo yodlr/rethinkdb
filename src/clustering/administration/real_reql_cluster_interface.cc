@@ -662,30 +662,50 @@ bool real_reql_cluster_interface_t::db_reconfigure(
     table_meta_client->list_names(&tables);
 
     ql::datum_t combined_stats = ql::datum_t::empty_object();
-    for (const auto &pair : tables) {
-        if (pair.second.database != db->id) {
-            continue;
+    bool error_occurred = false;
+    {
+        auto_drainer_t table_reconfigure_drainer;
+        for (const auto &pair : tables) {
+            if (pair.second.database != db->id) {
+                continue;
+            }
+            auto_drainer_t::lock_t drainer_lock(&table_reconfigure_drainer);
+            coro_t::spawn_sometime([&, drainer_lock]() {
+                // We wrap this into a function simply for being able to use
+                // `CATCH_OP_ERRORS`, which does a `return false`.
+                auto reconfigure_fun = [&]() -> bool {
+                    ql::datum_t stats;
+                    try {
+                        reconfigure_internal(
+                            db, pair.first, params, dry_run, &interruptor_on_home,
+                            &stats);
+                    } catch (const no_such_table_exc_t &) {
+                        /* The table got deleted during the reconfiguration. It would
+                        be weird if `r.db('foo').reconfigure()` produced an error
+                        complaining that some table `foo.bar` did not exist. So we
+                        just skip the table, as though it were deleted before the
+                        operation even began. */
+                        return true;
+                    } catch (const admin_op_exc_t &msg) {
+                        *error_out = admin_err_t{msg.what(), msg.query_state};
+                        return false;
+                    } CATCH_OP_ERRORS(db->name, pair.second.name, error_out,
+                        "The tables may or may not have been reconfigured.",
+                        "The tables may or may not have been reconfigured.")
+                    std::set<std::string> dummy_conditions;
+                    combined_stats = combined_stats.merge(stats, &ql::stats_merge,
+                        ql::configured_limits_t::unlimited, &dummy_conditions);
+                    guarantee(dummy_conditions.empty());
+                    return true;
+                };
+                error_occurred = error_occurred || !reconfigure_fun();
+            });
         }
-        ql::datum_t stats;
-        try {
-            reconfigure_internal(
-                db, pair.first, params, dry_run, &interruptor_on_home, &stats);
-        } catch (const no_such_table_exc_t &) {
-            /* The table got deleted during the reconfiguration. It would be weird if
-            `r.db('foo').reconfigure()` produced an error complaining that some table
-            `foo.bar` did not exist. So we just skip the table, as though it were
-            deleted before the operation even began. */
-            continue;
-        } catch (const admin_op_exc_t &msg) {
-            *error_out = admin_err_t{msg.what(), msg.query_state};
-            return false;
-        } CATCH_OP_ERRORS(db->name, pair.second.name, error_out,
-            "The tables may or may not have been reconfigured.",
-            "The tables may or may not have been reconfigured.")
-        std::set<std::string> dummy_conditions;
-        combined_stats = combined_stats.merge(stats, &ql::stats_merge,
-            ql::configured_limits_t::unlimited, &dummy_conditions);
-        guarantee(dummy_conditions.empty());
+        // table_reconfigure_drainer is destructed here, so we wait until
+        // all tables have been reconfigured.
+    }
+    if (error_occurred) {
+        return false;
     }
     *result_out = combined_stats;
     return true;
@@ -888,27 +908,46 @@ bool real_reql_cluster_interface_t::db_rebalance(
     table_meta_client->list_names(&tables);
 
     ql::datum_t combined_stats = ql::datum_t::empty_object();
-    for (const auto &pair : tables) {
-        if (pair.second.database != db->id) {
-            continue;
+    bool error_occurred = false;
+    {
+        auto_drainer_t table_reconfigure_drainer;
+        for (const auto &pair : tables) {
+            if (pair.second.database != db->id) {
+                continue;
+            }
+            auto_drainer_t::lock_t drainer_lock(&table_reconfigure_drainer);
+            coro_t::spawn_sometime([&, drainer_lock]() {
+                // We wrap this into a function simply for being able to use
+                // `CATCH_OP_ERRORS`, which does a `return false`.
+                auto rebalance_fun = [&]() -> bool {
+                    ql::datum_t stats;
+                    try {
+                        rebalance_internal(pair.first, &interruptor_on_home, &stats);
+                    } catch (const no_such_table_exc_t &) {
+                        /* This table was deleted while we were iterating over the
+                        tables list. So just ignore it to avoid making a confusing
+                        error message. */
+                        return true;
+                    } catch (const admin_op_exc_t &msg) {
+                        *error_out = admin_err_t{msg.what(), msg.query_state};
+                        return false;
+                    } CATCH_OP_ERRORS(db->name, pair.second.name, error_out,
+                        "The tables may or may not have been rebalanced.",
+                        "The tables may or may not have been rebalanced.")
+                    std::set<std::string> dummy_conditions;
+                    combined_stats = combined_stats.merge(stats, &ql::stats_merge,
+                        ql::configured_limits_t::unlimited, &dummy_conditions);
+                    guarantee(dummy_conditions.empty());
+                    return true;
+                };
+                error_occurred = error_occurred || !rebalance_fun();
+            });
         }
-        ql::datum_t stats;
-        try {
-            rebalance_internal(pair.first, &interruptor_on_home, &stats);
-        } catch (const no_such_table_exc_t &) {
-            /* This table was deleted while we were iterating over the tables list. So
-            just ignore it to avoid making a confusing error message. */
-            continue;
-        } catch (const admin_op_exc_t &msg) {
-            *error_out = admin_err_t{msg.what(), msg.query_state};
-            return false;
-        } CATCH_OP_ERRORS(db->name, pair.second.name, error_out,
-            "The tables may or may not have been rebalanced.",
-            "The tables may or may not have been rebalanced.")
-        std::set<std::string> dummy_conditions;
-        combined_stats = combined_stats.merge(stats, &ql::stats_merge,
-            ql::configured_limits_t::unlimited, &dummy_conditions);
-        guarantee(dummy_conditions.empty());
+        // table_reconfigure_drainer is destructed here, so we wait until
+        // all tables have been reconfigured.
+    }
+    if (error_occurred) {
+        return false;
     }
     *result_out = combined_stats;
     return true;
