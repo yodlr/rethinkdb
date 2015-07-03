@@ -131,8 +131,12 @@ void table_manager_t::get_status(
         response->shard_status = contract_executor.get_shard_status();
     }
     if (request.want_all_replicas_ready) {
-        new_mutex_acq_t leader_acq(&leader_mutex, interruptor);
-        if (static_cast<bool>(leader)) {
+        rwlock_in_line_t leader_acq(&leader_lock, access_t::read);
+        // If we don't get the read lock right away, that means that someone
+        // is holding a write lock and the leader is currently being modified.
+        // Rather than waiting until we can get the lock (which might take a while),
+        // we simply report all replicas ready as false.
+        if (leader_acq.read_signal()->is_pulsed() && static_cast<bool>(leader)) {
             response->all_replicas_ready =
                 leader->get_contract_coordinator()->
                     check_all_replicas_ready(interruptor);
@@ -233,7 +237,7 @@ void table_manager_t::on_raft_readiness_change() {
     coroutine to do it. */
     auto_drainer_t::lock_t keepalive(&drainer);
     coro_t::spawn_sometime([this, keepalive /* important to capture */]() {
-        new_mutex_acq_t mutex_acq(&leader_mutex);
+        rwlock_acq_t mutex_acq(&leader_lock, access_t::write);
         bool ready = raft.get_raft()->get_readiness_for_change()->get();
         if (ready && !leader.has()) {
             leader.init(new leader_t(this));
