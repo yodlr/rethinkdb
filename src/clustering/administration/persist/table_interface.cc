@@ -198,11 +198,20 @@ void real_table_persistence_interface_t::read_all_metadata(
         },
         interruptor);
     storage_interfaces.clear();
-    for (const auto &pair : active_tables) {
-        storage_interfaces[pair.first].init(new table_raft_storage_interface_t(
-            metadata_file, &read_txn, pair.first, interruptor));
-        active_cb(
-            pair.first, pair.second, storage_interfaces[pair.first].get(), &read_txn);
+    {
+        auto_drainer_t active_cb_drainer;
+        for (const auto &pair : active_tables) {
+            auto_drainer_t::lock_t drainer_lock(&active_cb_drainer);
+            coro_t::spawn_sometime([&, pair, drainer_lock]() {
+                storage_interfaces[pair.first].init(new table_raft_storage_interface_t(
+                    metadata_file, &read_txn, pair.first, interruptor));
+                active_cb(
+                    pair.first, pair.second, storage_interfaces[pair.first].get(),
+                    &read_txn);
+            });
+        }
+        // active_cb_drainer is destructed here to make sure all active_cb callbacks
+        // have completed.
     }
 
     read_txn.read_many<table_inactive_persistent_state_t>(

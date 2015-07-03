@@ -31,6 +31,8 @@ public:
         thread_counter(0)
         { }
 
+    // `read_all_metadata` might make multiple concurrent calls to `active_cb`
+    // for different metadata entries.
     void read_all_metadata(
         const std::function<void(
             const namespace_id_t &table_id,
