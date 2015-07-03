@@ -211,24 +211,26 @@ void store_t::write(
         THROWS_ONLY(interrupted_exc_t) {
     assert_thread();
 
-    scoped_ptr_t<txn_t> txn;
-    scoped_ptr_t<real_superblock_t> real_superblock;
-
     // If the write is a dummy write, we don't actually start a transaction
     // and don't acquire the superblock or update the metainfo. If we did,
     // that would cause disk writes for every dummy write.
     // We don't want that because we're using dummy writes to test table
     // readiness in a lot of places and performing actual writes badly impacts
     // performance.
-    if (boost::get<dummy_write_t>(&write.write) == nullptr) {
-        // We assume one block per document, plus changes to the stats block and superblock.
-        const int expected_change_count = 2 + write.expected_document_changes();
-        acquire_superblock_for_write(expected_change_count, durability, token,
-                                     &txn, &real_superblock, interruptor);
-        DEBUG_ONLY_CODE(metainfo->visit(
-            real_superblock.get(), metainfo_checker.region, metainfo_checker.callback));
-        metainfo->update(real_superblock.get(), new_metainfo);
+    if (boost::get<dummy_write_t>(&write.write) != nullptr) {
+        response->response = dummy_write_response_t();
+        return;
     }
+
+    scoped_ptr_t<txn_t> txn;
+    scoped_ptr_t<real_superblock_t> real_superblock;
+    // We assume one block per document, plus changes to the stats block and superblock.
+    const int expected_change_count = 2 + write.expected_document_changes();
+    acquire_superblock_for_write(expected_change_count, durability, token,
+                                 &txn, &real_superblock, interruptor);
+    DEBUG_ONLY_CODE(metainfo->visit(
+        real_superblock.get(), metainfo_checker.region, metainfo_checker.callback));
+    metainfo->update(real_superblock.get(), new_metainfo);
     protocol_write(write, response, timestamp, &real_superblock, interruptor);
 }
 
