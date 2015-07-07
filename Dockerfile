@@ -14,5 +14,5 @@ WORKDIR /src
 ADD . /src
 
 RUN ./configure --allow-fetch
-RUN make -j 2
+RUN make -j 8
 RUN sudo make install
