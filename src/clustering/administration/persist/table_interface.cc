@@ -200,11 +200,8 @@ void real_table_persistence_interface_t::read_all_metadata(
         interruptor);
     storage_interfaces.clear();
 
-    /* The number of tables to initialize concurrently. Setting this too high
-    can lead to excessive memory usage on startup for large tables
-    (due to LBA_READ_BUFFER_SIZE and others). Setting it too low will make
-    startup slow on rotational drives if there are a lot of tables. */
-    const int64_t num_concurrent_inits = 8;
+    /* The number of raft states to initialize concurrently. */
+    const int64_t num_concurrent_inits = 16;
     throttled_pmap(0, active_tables.size(),
         [&](int64_t i) {
             const auto &pair = active_tables[i];

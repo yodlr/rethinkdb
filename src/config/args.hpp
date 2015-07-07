@@ -158,7 +158,7 @@
 // How many bytes of buffering space we can use per disk when reading the LBA. If it's set
 // too high, then RethinkDB will eat a lot of memory at startup.
 // If it's set too low, startup will take a longer time.
-#define LBA_READ_BUFFER_SIZE                      (32 * MEGABYTE)
+#define LBA_READ_BUFFER_SIZE                      (128 * MEGABYTE)
 
 // After the LBA has been read, we reconstruct the in-memory LBA index.
 // For huge tables, this can take some considerable CPU time. We break the reconstruction
