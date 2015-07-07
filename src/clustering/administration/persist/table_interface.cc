@@ -190,22 +190,30 @@ void real_table_persistence_interface_t::read_all_metadata(
         signal_t *interruptor) {
     metadata_file_t::read_txn_t read_txn(metadata_file, interruptor);
 
-    std::map<namespace_id_t, table_active_persistent_state_t> active_tables;
+    std::vector<std::pair<namespace_id_t, table_active_persistent_state_t> >
+        active_tables;
     read_txn.read_many<table_active_persistent_state_t>(
         mdprefix_table_active(),
         [&](const std::string &uuid_str, const table_active_persistent_state_t &state) {
-            active_tables[str_to_uuid(uuid_str)] = state;
+            active_tables.push_back(std::make_pair(str_to_uuid(uuid_str), state));
         },
         interruptor);
     storage_interfaces.clear();
-    pmap(active_tables.begin(), active_tables.end(),
-        [&](const std::pair<namespace_id_t, table_active_persistent_state_t> &pair) {
+
+    /* The number of tables to initialize concurrently. Setting this too high
+    can lead to excessive memory usage on startup for large tables
+    (due to LBA_READ_BUFFER_SIZE and others). Setting it too low will make
+    startup slow on rotational drives if there are a lot of tables. */
+    const int64_t num_concurrent_inits = 8;
+    throttled_pmap(0, active_tables.size(),
+        [&](int64_t i) {
+            const auto &pair = active_tables[i];
             storage_interfaces[pair.first].init(new table_raft_storage_interface_t(
                 metadata_file, &read_txn, pair.first, interruptor));
             active_cb(
                 pair.first, pair.second, storage_interfaces[pair.first].get(),
                 &read_txn);
-        });
+        }, num_concurrent_inits);
 
     read_txn.read_many<table_inactive_persistent_state_t>(
         mdprefix_table_inactive(),
