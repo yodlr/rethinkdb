@@ -1,11 +1,11 @@
 {
   "name": "packed-bluebird",
-  "version": "2.9.25",
+  "version": "2.9.32",
   "dependencies": {
     "bluebird": {
-      "version": "2.9.25",
-      "from": "bluebird@2.9.25",
-      "resolved": "https://registry.npmjs.org/bluebird/-/bluebird-2.9.25.tgz"
+      "version": "2.9.32",
+      "from": "bluebird@2.9.32",
+      "resolved": "https://registry.npmjs.org/bluebird/-/bluebird-2.9.32.tgz"
     }
   }
 }
