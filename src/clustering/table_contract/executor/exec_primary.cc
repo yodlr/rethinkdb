@@ -106,7 +106,6 @@ void primary_execution_t::update_contract_or_raft_state(
 
 void primary_execution_t::run(auto_drainer_t::lock_t keepalive) {
     assert_thread();
-    order_source_t order_source(store->home_thread());
     cross_thread_signal_t interruptor_store_thread(
         keepalive.get_drain_signal(), store->home_thread());
 
@@ -117,7 +116,6 @@ void primary_execution_t::run(auto_drainer_t::lock_t keepalive) {
         read_token_t token;
         store->new_read_token(&token);
         region_map_t<version_t> initial_version = to_version_map(store->get_metainfo(
-            order_source.check_in("primary_t").with_read_mode(),
             &token, region, &interruptor_store_thread));
 
         primary_dispatcher_t primary_dispatcher(

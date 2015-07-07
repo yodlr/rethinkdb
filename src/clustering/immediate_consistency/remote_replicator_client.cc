@@ -325,8 +325,7 @@ remote_replicator_client_t::remote_replicator_client_t(
         read_token_t read_token;
         store->new_read_token(&read_token);
         region_map_t<version_t> version = to_version_map(store->get_metainfo(
-            order_token_t::ignore.with_read_mode(), &read_token, region_,
-            interruptor));
+            &read_token, region_, interruptor));
         version_t expect(branch_id,
             timestamp_enforcer_->get_latest_all_before_completed());
         version.visit(region_,
@@ -426,12 +425,12 @@ void remote_replicator_client_t::on_write_async(
 #endif
                 write_response_t dummy_response;
                 store_->write(DEBUG_ONLY(checker, ) new_metainfo, subwrite,
-                    &dummy_response, write_durability_t::SOFT, timestamp, order_token,
+                    &dummy_response, write_durability_t::SOFT, timestamp,
                     &token, interruptor);
             } else {
                 /* The write doesn't actually affect any keys in this region, but we
                 still have to update the metainfo for consistency's sake. */
-                store_->set_metainfo(new_metainfo, order_token, &token,
+                store_->set_metainfo(new_metainfo, &token,
                     write_durability_t::SOFT, interruptor);
             }
         }

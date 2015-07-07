@@ -13,7 +13,6 @@
 namespace unittest {
 
 TPTEST(ClusteringBackfill, BackfillTest) {
-    order_source_t order_source;
     cond_t non_interruptor;
 
     /* Set up two stores */
@@ -43,7 +42,6 @@ TPTEST(ClusteringBackfill, BackfillTest) {
             region_map_t<binary_blob_t>(
                 region,
                 binary_blob_t(version_t(dummy_branch_id, timestamp))),
-            order_source.check_in(strprintf("set_metainfo(i=%zu)", i)),
             &token,
             write_durability_t::HARD,
             &non_interruptor);
@@ -78,7 +76,6 @@ TPTEST(ClusteringBackfill, BackfillTest) {
                 w,
                 &response, write_durability_t::SOFT,
                 timestamp,
-                order_source.check_in(strprintf("backfiller_store.write(j=%d)", j)),
                 &token,
                 &non_interruptor);
         }
@@ -136,7 +133,6 @@ TPTEST(ClusteringBackfill, BackfillTest) {
 
     region_map_t<version_t> backfillee_metadata =
         to_version_map(backfillee_store.get_metainfo(
-            order_source.check_in("backfillee_store.get_metainfo").with_read_mode(),
             &token1, backfillee_store.get_region(), &non_interruptor));
 
     read_token_t token2;
@@ -144,7 +140,6 @@ TPTEST(ClusteringBackfill, BackfillTest) {
 
     region_map_t<version_t> backfiller_metadata =
         to_version_map(backfiller_store.get_metainfo(
-            order_source.check_in("backfiller_store.get_metainfo").with_read_mode(),
             &token2, backfiller_store.get_region(), &non_interruptor));
 
     EXPECT_TRUE(backfillee_metadata == backfiller_metadata);

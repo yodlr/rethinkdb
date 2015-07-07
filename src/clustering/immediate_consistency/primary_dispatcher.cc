@@ -171,19 +171,30 @@ void primary_dispatcher_t::spawn_write(
             unreachable();
     }
 
+    state_timestamp_t write_timestamp;
+    // Dummy writes are not actually written to disk and don't go through
+    // any ordering. Hence they must not receive their own timestamp.
+    if (boost::get<dummy_write_t>(&write.write) != nullptr) {
+        write_timestamp = current_timestamp;
+    } else {
+        write_timestamp = current_timestamp.next();
+    }
+
     counted_t<incomplete_write_t> incomplete_write = make_counted<incomplete_write_t>(
         write,
-        current_timestamp.next(),
+        write_timestamp,
         order_checkpoint.check_through(order_token),
         durability,
         cb);
 
-    current_timestamp = current_timestamp.next();
+    current_timestamp = write_timestamp;
 
     // You can't reuse the same callback for two writes.
     guarantee(cb->write == nullptr);
     cb->write = incomplete_write.get();
 
+    // TODO! What happens with dummy writes and backfillers? We probably need to
+    // handle it in a special way there.
     for (const auto &pair : dispatchees) {
         pair.first->background_write_queue.push(
             std::bind(&primary_dispatcher_t::background_write, this,

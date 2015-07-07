@@ -26,7 +26,6 @@ public:
         home_thread_mixin_t::real_home_thread = new_thread;
         token_source_.rethread(new_thread);
         token_sink_.rethread(new_thread);
-        order_sink_.rethread(new_thread);
     }
 
     void note_reshard() { }
@@ -35,14 +34,12 @@ public:
     void new_write_token(write_token_t *token_out);
 
     region_map_t<binary_blob_t> get_metainfo(
-            order_token_t order_token,
             read_token_t *token,
             const region_t &region,
             signal_t *interruptor)
             THROWS_ONLY(interrupted_exc_t);
 
     void set_metainfo(const region_map_t<binary_blob_t> &new_metainfo,
-                      order_token_t order_token,
                       write_token_t *token,
                       write_durability_t durability,
                       signal_t *interruptor) THROWS_ONLY(interrupted_exc_t);
@@ -62,7 +59,6 @@ public:
             write_response_t *response,
             write_durability_t durability,
             state_timestamp_t timestamp,
-            order_token_t order_token,
             write_token_t *token,
             signal_t *interruptor)
         THROWS_ONLY(interrupted_exc_t);
@@ -101,8 +97,6 @@ public:
 private:
     fifo_enforcer_source_t token_source_;
     fifo_enforcer_sink_t token_sink_;
-
-    order_sink_t order_sink_;
 
     rng_t rng_;
     region_map_t<binary_blob_t> metainfo_;

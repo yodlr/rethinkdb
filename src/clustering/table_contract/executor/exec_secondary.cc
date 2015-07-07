@@ -63,7 +63,6 @@ void secondary_execution_t::update_contract_or_raft_state(
 
 void secondary_execution_t::run(auto_drainer_t::lock_t keepalive) {
     assert_thread();
-    order_source_t order_source(store->home_thread());
     bool enabled_gc = false;
     while (!keepalive.get_drain_signal()->is_pulsed()) {
         try {
@@ -79,7 +78,6 @@ void secondary_execution_t::run(auto_drainer_t::lock_t keepalive) {
             store->new_read_token(&token);
             initial_ack.version = boost::make_optional(to_version_map(
                 store->get_metainfo(
-                    order_source.check_in("secondary_execution_t").with_read_mode(),
                     &token, region, &interruptor_on_store_thread)));
 
             direct_query_server_t direct_query_server(context->mailbox_manager, store);

@@ -103,7 +103,6 @@ void run_with_namespace_interface(
         order_source_t order_source;
         dummy_namespace_interface_t nsi(nsi_shards,
                                         store_ptrs.data(),
-                                        &order_source,
                                         &ctx,
                                         do_create);
 

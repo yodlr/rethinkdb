@@ -127,7 +127,7 @@ region_map_t<version_t> get_store_version_map(store_view_t *store) {
     store->new_read_token(&token);
     cond_t non_interruptor;
     return to_version_map(store->get_metainfo(
-        order_token_t::ignore, &token, store->get_region(), &non_interruptor));
+        &token, store->get_region(), &non_interruptor));
 }
 
 backfill_config_t unlimited_queues_config() {
@@ -224,9 +224,9 @@ void run_backfill_test(const backfill_test_config_t &cfg) {
     cond_t non_interruptor;
 
     in_memory_branch_history_manager_t bhm;
-    test_store_t store1(&io_backender, &order_source, &ctx);
-    test_store_t store2(&io_backender, &order_source, &ctx);
-    test_store_t store3(&io_backender, &order_source, &ctx);
+    test_store_t store1(&io_backender, &ctx);
+    test_store_t store2(&io_backender, &ctx);
+    test_store_t store3(&io_backender, &ctx);
 
     std::map<std::string, std::string> first_inserter_state;
 

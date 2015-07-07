@@ -57,7 +57,7 @@ inline merger_serializer_t *create_and_construct_serializer(temp_file_t *temp_fi
 
 class test_store_t {
 public:
-    test_store_t(io_backender_t *io_backender, order_source_t *order_source, rdb_context_t *ctx) :
+    test_store_t(io_backender_t *io_backender, rdb_context_t *ctx) :
             serializer(create_and_construct_serializer(&temp_file, io_backender)),
             balancer(new dummy_cache_balancer_t(GIGABYTE)),
             store(region_t::universe(), serializer.get(), balancer.get(),
@@ -71,7 +71,7 @@ public:
         region_map_t<binary_blob_t> new_metainfo(
                 store.get_region(),
                 binary_blob_t(version_t::zero()));
-        store.set_metainfo(new_metainfo, order_source->check_in("test_store_t"), &token,
+        store.set_metainfo(new_metainfo, &token,
             write_durability_t::SOFT, &non_interruptor);
     }
 

@@ -358,8 +358,7 @@ backfillee_t::backfillee_t(
         read_token_t read_token;
         store->new_read_token(&read_token);
         our_intro.initial_version = to_version_map(store->get_metainfo(
-            order_token_t::ignore.with_read_mode(), &read_token, store->get_region(),
-            interruptor));
+            &read_token, store->get_region(), interruptor));
     }
     {
         on_thread_t thread_switcher(branch_history_manager->home_thread());

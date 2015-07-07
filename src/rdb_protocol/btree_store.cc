@@ -205,22 +205,10 @@ void store_t::write(
         write_response_t *response,
         const write_durability_t durability,
         state_timestamp_t timestamp,
-        UNUSED order_token_t order_token,  // TODO
         write_token_t *token,
         signal_t *interruptor)
         THROWS_ONLY(interrupted_exc_t) {
     assert_thread();
-
-    // If the write is a dummy write, we don't actually start a transaction
-    // and don't acquire the superblock or update the metainfo. If we did,
-    // that would cause disk writes for every dummy write.
-    // We don't want that because we're using dummy writes to test table
-    // readiness in a lot of places and performing actual writes badly impacts
-    // performance.
-    if (boost::get<dummy_write_t>(&write.write) != nullptr) {
-        response->response = dummy_write_response_t();
-        return;
-    }
 
     scoped_ptr_t<txn_t> txn;
     scoped_ptr_t<real_superblock_t> real_superblock;
@@ -1161,7 +1149,6 @@ bool store_t::acquire_sindex_superblocks_for_write(
 }
 
 region_map_t<binary_blob_t> store_t::get_metainfo(
-        UNUSED order_token_t order_token,  // TODO
         read_token_t *token,
         const region_t &region,
         signal_t *interruptor)
@@ -1177,7 +1164,6 @@ region_map_t<binary_blob_t> store_t::get_metainfo(
 }
 
 void store_t::set_metainfo(const region_map_t<binary_blob_t> &new_metainfo,
-                           UNUSED order_token_t order_token,  // TODO
                            write_token_t *token,
                            write_durability_t durability,
                            signal_t *interruptor) THROWS_ONLY(interrupted_exc_t) {

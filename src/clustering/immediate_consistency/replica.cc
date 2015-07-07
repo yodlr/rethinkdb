@@ -60,6 +60,18 @@ void replica_t::do_write(
     rassert(!region_is_empty(write.get_region()));
     order_token.assert_write_mode();
 
+    // If the write is a dummy write, we don't need to go any further. If we did,
+    // that would cause disk writes for every dummy write.
+    // We don't want that because we're using dummy writes to test table
+    // readiness in a lot of places and performing actual writes badly impacts
+    // performance.
+    // A dummy write also doesn't have its own timestamp, so we don't want
+    // to go through the start_enforcer and end_enforcer.
+    if (boost::get<dummy_write_t>(&write.write) != nullptr) {
+        response_out->response = dummy_write_response_t();
+        return;
+    }
+
     write_token_t write_token;
     {
         /* Wait until it's our turn to go. */
@@ -90,7 +102,6 @@ void replica_t::do_write(
         response_out,
         durability,
         timestamp,
-        order_token,
         &write_token,
         interruptor);
 

@@ -30,8 +30,7 @@ public:
 
     void write(const write_t &write,
                write_response_t *response,
-               state_timestamp_t timestamp,
-               order_token_t order_token) THROWS_NOTHING;
+               state_timestamp_t timestamp) THROWS_NOTHING;
 
     order_source_t bs_outdated_read_source;
 
@@ -41,7 +40,7 @@ public:
 struct dummy_timestamper_t {
 
 public:
-    dummy_timestamper_t(dummy_performer_t *n, order_source_t *order_source);
+    dummy_timestamper_t(dummy_performer_t *n);
 
     void read(const read_t &read, read_response_t *response, order_token_t otok, signal_t *interruptor) THROWS_ONLY(interrupted_exc_t);
 
@@ -79,8 +78,7 @@ private:
 class dummy_namespace_interface_t : public namespace_interface_t {
 public:
     dummy_namespace_interface_t(std::vector<region_t> shards,
-                                store_view_t *const *stores, order_source_t
-                                *order_source, rdb_context_t *_ctx,
+                                store_view_t *const *stores, rdb_context_t *_ctx,
                                 bool initialize_metadata);
 
     void read(const read_t &read, read_response_t *response, order_token_t tok, signal_t *interruptor) THROWS_ONLY(cannot_perform_query_exc_t, interrupted_exc_t) {
