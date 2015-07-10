@@ -15,4 +15,4 @@ ADD . /src
 
 RUN ./configure --allow-fetch
 RUN make -j 1
-RUN sudo make install
+RUN make install
